@@ -181,8 +181,9 @@ class AutonomousBlueskyBotV2:
         self.bluesky_client = AsyncClient()
         self.authenticated = False
         
-        # Единая HTTP сессия для всех операций
+        # Единая HTTP сессия для всех операций с таймаутами
         self.http_session = None
+        self._create_http_session()
         
         # AI clients - Pollinations.AI priority with English language
         self.pollinations_ai = PollinationsAI(default_model='creative', language='en')
@@ -324,6 +325,10 @@ class AutonomousBlueskyBotV2:
         # Инициализация системы трендов и динамической генерации контента
         self.trending_tracker = BlueSkyTrendingTracker(self.bluesky_client)
         self.dynamic_generator = DynamicContentGenerator(self.trending_tracker)
+        
+        # Система мониторинга активности (heartbeat)
+        self.last_heartbeat = datetime.now()
+        self.heartbeat_file = 'bot_heartbeat.txt'
     
     def load_external_config(self, config_file='bot_config.json'):
         """Загружает внешнюю конфигурацию, чтобы ее можно было изменять."""
@@ -353,6 +358,62 @@ class AutonomousBlueskyBotV2:
                     "max_comments_per_cycle": 2  # ИЗМЕНЕНО: Максимум 2 комментария за цикл (было 4)
                 }
             }
+    
+    def _create_http_session(self) -> None:
+        """Создает HTTP сессию с надежными таймаутами"""
+        timeout = aiohttp.ClientTimeout(
+            total=60,      # Общий таймаут запроса
+            connect=10,    # Таймаут соединения 
+            sock_read=30   # Таймаут чтения данных
+        )
+        
+        self.http_session = aiohttp.ClientSession(
+            timeout=timeout,
+            connector=aiohttp.TCPConnector(
+                limit=20,           # Максимум 20 одновременных соединений
+                limit_per_host=5,   # Максимум 5 на хост
+                ttl_dns_cache=300,  # Кэш DNS на 5 минут
+                use_dns_cache=True,
+                keepalive_timeout=30
+            )
+        )
+        logger.info("🌐 HTTP сессия создана с защитными таймаутами")
+    
+    def _update_heartbeat(self) -> None:
+        """Обновляет файл heartbeat для мониторинга активности"""
+        try:
+            self.last_heartbeat = datetime.now()
+            with open(self.heartbeat_file, 'w') as f:
+                f.write(f"{self.last_heartbeat.isoformat()}\n")
+                f.write(f"PID: {os.getpid()}\n")
+                f.write(f"Status: active\n")
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось обновить heartbeat: {e}")
+    
+    def _check_for_hanging(self) -> bool:
+        """Проверяет не завис ли бот на основе heartbeat файла"""
+        try:
+            if not os.path.exists(self.heartbeat_file):
+                return False
+                
+            with open(self.heartbeat_file, 'r') as f:
+                lines = f.readlines()
+                if not lines:
+                    return False
+                    
+                last_heartbeat_str = lines[0].strip()
+                last_heartbeat = datetime.fromisoformat(last_heartbeat_str)
+                
+                # Если heartbeat старше 15 минут - возможное зависание
+                time_diff = (datetime.now() - last_heartbeat).total_seconds()
+                if time_diff > 900:  # 15 минут
+                    logger.warning(f"⚠️ Потенциальное зависание: последний heartbeat {time_diff/60:.1f} минут назад")
+                    return True
+                    
+                return False
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка проверки зависания: {e}")
+            return False
     
     # Копируем все базовые методы из оригинального бота
     def clean_html(self, raw_html: str) -> str:
@@ -1892,6 +1953,8 @@ class AutonomousBlueskyBotV2:
         while True:
             try:
                 cycle_start = time.time()
+                # Обновляем heartbeat в начале каждого цикла
+                self._update_heartbeat()
                 logger.info(f"🔄 Цикл {cycle_count + 1} - {datetime.now()}")
                 
                 # Умное взаимодействие с контентом (каждый цикл для большей активности)
@@ -1948,6 +2011,16 @@ class AutonomousBlueskyBotV2:
                 if cycle_count % 30 == 0 and cycle_count > 0:
                     logger.info("📊 Запуск анализа разнообразия постов...")
                     await self.analyze_post_diversity()
+                
+                # Мониторинг здоровья бота каждые 20 циклов (примерно раз в 3-4 часа)
+                if cycle_count % 20 == 0 and cycle_count > 0:
+                    health_status = await self.health_monitor()
+                    if health_status['overall_health'] == 'critical':
+                        logger.warning("🚨 Критическое состояние здоровья! Запуск экстренного восстановления...")
+                        recovery_success = await self.emergency_recovery()
+                        if not recovery_success:
+                            logger.error("❌ Экстренное восстановление не удалось")
+                            break
                 
                 # Логируем статистику Pollinations.AI
                 ai_stats = self.pollinations_ai.get_statistics()
@@ -2894,6 +2967,243 @@ class AutonomousBlueskyBotV2:
                 logger.info(f"   - '{pattern[:50]}...' ({count} раз)")
         
         return analysis
+    
+    async def health_monitor(self) -> Dict[str, any]:
+        """Мониторинг здоровья бота и автоматическое восстановление"""
+        logger.info("🏥 Запуск мониторинга здоровья бота...")
+        
+        health_status = {
+            'overall_health': 'healthy',
+            'last_activity': None,
+            'network_status': 'unknown',
+            'memory_usage': 0,
+            'api_connectivity': {},
+            'recommendations': [],
+            'auto_recovery_actions': []
+        }
+        
+        try:
+            # 1. Проверка сетевого подключения
+            network_checks = await self._check_network_connectivity()
+            health_status['api_connectivity'] = network_checks
+            health_status['network_status'] = 'healthy' if network_checks.get('bluesky_api', False) else 'degraded'
+            
+            # 2. Проверка использования памяти
+            try:
+                import psutil
+                process = psutil.Process()
+                memory_mb = process.memory_info().rss / 1024 / 1024
+                health_status['memory_usage'] = memory_mb
+            except ImportError:
+                health_status['memory_usage'] = 0
+                logger.warning("⚠️ psutil не установлен, мониторинг памяти недоступен")
+            
+            # 3. Проверка последней активности
+            last_activity = await self._check_last_activity()
+            health_status['last_activity'] = last_activity
+            
+            # 4. Анализ потенциальных проблем
+            issues = await self._analyze_potential_issues(health_status)
+            
+            # 5. Автоматическое восстановление если нужно
+            recovery_actions = await self._perform_auto_recovery(issues)
+            health_status['auto_recovery_actions'] = recovery_actions
+            
+            # 6. Общая оценка здоровья
+            if len(issues) == 0:
+                health_status['overall_health'] = 'healthy'
+            elif len(issues) <= 2:
+                health_status['overall_health'] = 'warning'
+            else:
+                health_status['overall_health'] = 'critical'
+                
+            logger.info(f"🏥 Мониторинг завершен: {health_status['overall_health']}")
+            for action in recovery_actions:
+                logger.info(f"🔧 Восстановление: {action}")
+                
+            return health_status
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка мониторинга здоровья: {e}")
+            health_status['overall_health'] = 'error'
+            return health_status
+    
+    async def _check_network_connectivity(self) -> Dict[str, bool]:
+        """Проверка доступности внешних API"""
+        connectivity = {
+            'bluesky_api': False,
+            'pollinations_ai': False,
+            'openai_api': False,
+            'general_internet': False
+        }
+        
+        # Проверяем каждый сервис с таймаутом
+        async def check_endpoint(url: str, timeout: int = 10) -> bool:
+            try:
+                if not self.http_session:
+                    return False
+                async with self.http_session.get(url, timeout=timeout) as response:
+                    return response.status < 500
+            except Exception as e:
+                logger.debug(f"Сетевая проверка {url}: {e}")
+                return False
+        
+        try:
+            # Быстрые проверки параллельно
+            tasks = [
+                check_endpoint('https://rooter.us-west.host.bsky.network/'),
+                check_endpoint('https://text.pollinations.ai/'),
+                check_endpoint('https://api.openai.com/'),
+                check_endpoint('https://httpbin.org/get')  # Общий интернет
+            ]
+            
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            connectivity['bluesky_api'] = results[0] if isinstance(results[0], bool) else False
+            connectivity['pollinations_ai'] = results[1] if isinstance(results[1], bool) else False
+            connectivity['openai_api'] = results[2] if isinstance(results[2], bool) else False
+            connectivity['general_internet'] = results[3] if isinstance(results[3], bool) else False
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка проверки сети: {e}")
+            
+        return connectivity
+    
+    async def _check_last_activity(self) -> Dict[str, any]:
+        """Проверка последней активности бота"""
+        try:
+            now = datetime.now()
+            activity = {
+                'last_post_hours_ago': None,
+                'last_engagement_hours_ago': None,
+                'cycles_without_posts': 0,
+                'stuck_in_cycle': False
+            }
+            
+            # Проверяем последний пост
+            if self.memory.successful_posts:
+                last_post_time = max(post.get('timestamp', now) for post in self.memory.successful_posts[-10:])
+                if isinstance(last_post_time, str):
+                    last_post_time = datetime.fromisoformat(last_post_time.replace('Z', '+00:00'))
+                activity['last_post_hours_ago'] = (now - last_post_time).total_seconds() / 3600
+            
+            # Проверяем активность взаимодействий
+            if hasattr(self, 'session_stats'):
+                if self.session_stats.get('likes_given', 0) > 0:
+                    activity['last_engagement_hours_ago'] = 0  # Недавно ставили лайки
+                else:
+                    activity['last_engagement_hours_ago'] = 2  # Примерная оценка
+            
+            # Определяем застревание в цикле
+            if activity['last_post_hours_ago'] and activity['last_post_hours_ago'] > 6:
+                activity['stuck_in_cycle'] = True
+                
+            return activity
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка проверки активности: {e}")
+            return {}
+    
+    async def _analyze_potential_issues(self, health_status: Dict) -> List[str]:
+        """Анализ потенциальных проблем"""
+        issues = []
+        
+        # Проверка сетевых проблем
+        if not health_status['api_connectivity'].get('bluesky_api', False):
+            issues.append('bluesky_api_unavailable')
+        
+        if not health_status['api_connectivity'].get('general_internet', False):
+            issues.append('internet_connectivity_issue')
+        
+        # Проверка использования памяти
+        if health_status['memory_usage'] > 400:  # Более 400MB
+            issues.append('high_memory_usage')
+        
+        # Проверка активности
+        activity = health_status.get('last_activity', {})
+        if activity.get('stuck_in_cycle', False):
+            issues.append('stuck_in_posting_cycle')
+        
+        if activity.get('last_post_hours_ago', 0) > 8:  # Нет постов 8+ часов
+            issues.append('no_posts_long_time')
+        
+        return issues
+    
+    async def _perform_auto_recovery(self, issues: List[str]) -> List[str]:
+        """Автоматические действия по восстановлению"""
+        recovery_actions = []
+        
+        try:
+            # Очистка памяти при высоком использовании
+            if 'high_memory_usage' in issues:
+                self._cleanup_old_content_hashes()
+                self._cleanup_old_commented_posts()
+                recovery_actions.append('memory_cleanup_performed')
+            
+            # Принудительное создание поста если долго не было
+            if 'no_posts_long_time' in issues:
+                try:
+                    emergency_post = await self._create_emergency_unique_post()
+                    if emergency_post:
+                        recovery_actions.append('emergency_post_created')
+                except Exception as e:
+                    logger.warning(f"⚠️ Не удалось создать экстренный пост: {e}")
+            
+            # Сброс состояния при зависании
+            if 'stuck_in_posting_cycle' in issues:
+                recovery_actions.append('cycle_state_reset')
+            
+            # Переинициализация HTTP сессии при сетевых проблемах
+            if 'bluesky_api_unavailable' in issues or 'internet_connectivity_issue' in issues:
+                try:
+                    if self.http_session:
+                        await self.http_session.close()
+                    self.http_session = aiohttp.ClientSession(
+                        timeout=aiohttp.ClientTimeout(total=30)
+                    )
+                    recovery_actions.append('http_session_reinitialized')
+                except Exception as e:
+                    logger.warning(f"⚠️ Не удалось переинициализировать HTTP сессию: {e}")
+        
+        except Exception as e:
+            logger.error(f"❌ Ошибка автовосстановления: {e}")
+            recovery_actions.append(f'recovery_error: {str(e)}')
+        
+        return recovery_actions
+    
+    async def emergency_recovery(self) -> bool:
+        """Экстренное восстановление бота при критических проблемах"""
+        logger.warning("🚨 ЭКСТРЕННОЕ ВОССТАНОВЛЕНИЕ АКТИВИРОВАНО")
+        
+        try:
+            # 1. Сохраняем текущее состояние
+            self.memory.save()
+            logger.info("💾 Состояние сохранено")
+            
+            # 2. Очищаем все кэши и временные данные
+            self._cleanup_old_content_hashes()
+            self._cleanup_old_commented_posts()
+            logger.info("🧹 Кэши очищены")
+            
+            # 3. Переинициализируем HTTP сессию
+            if self.http_session:
+                await self.http_session.close()
+            self.http_session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=30)
+            )
+            logger.info("🔄 HTTP сессия переинициализирована")
+            
+            # 4. Проверяем аутентификацию
+            auth_success = await self.authenticate()
+            if not auth_success:
+                logger.error("❌ Не удалось восстановить аутентификацию")
+                return False
+            
+            logger.info("✅ Экстренное восстановление завершено успешно")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Критическая ошибка экстренного восстановления: {e}")
+            return False
 
 async def main():
     # Загружаем конфигурацию из переменных окружения

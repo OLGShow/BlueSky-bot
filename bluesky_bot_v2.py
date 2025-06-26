@@ -847,12 +847,20 @@ class AutonomousBlueskyBotV2:
             Create a personal social media post about this news: "{selected_news['title']}"
             Start with the personal comment: "{personal_comment}"
             
-            Provide the output in JSON format with "post_text" (in English, 150-200 chars, retell the news briefly in your own words, add a question) and "hashtags" (in English, 2-3 relevant tags).
+            Provide the output in JSON format with "post_text" (in English, 150-200 chars, retell the news briefly in your own words, add a natural ending - it can be a question, observation, emoji, or statement) and "hashtags" (in English, 2-3 relevant tags).
 
-            Example:
+            Examples:
             {{
-              "post_text": "Interesting turn! 🤔 OpenAI just released a new model with revolutionary capabilities. What do you think, will this change our work?",
+              "post_text": "Interesting turn! 🤔 OpenAI just released a new model with revolutionary capabilities. This could change everything.",
               "hashtags": "#news #AI #technology"
+            }}
+            {{
+              "post_text": "Classic! 🙄 Another tech CEO promises to revolutionize everything. We'll see...",
+              "hashtags": "#tech #startup #news"
+            }}
+            {{
+              "post_text": "Wow! New research shows AI can predict weather patterns 10x better than before 🌩️",
+              "hashtags": "#science #AI #weather"
             }}
             """
             
@@ -941,22 +949,41 @@ class AutonomousBlueskyBotV2:
         async def content_creator():
             ai_prompt = f"""
             Create a thoughtful social media post about "{selected_aspect}".
-            Provide the output in JSON format with two keys: "post_text" (in English, 180-220 characters, personal and engaging) and "hashtags" (in English, 3-4 relevant tags, starting with #).
+            Provide the output in JSON format with two keys: "post_text" (in English, 180-220 characters, personal and engaging - can end with a question, statement, observation, or emoji) and "hashtags" (in English, 3-4 relevant tags, starting with #).
 
-            Example:
+            Examples:
             {{
-              "post_text": "AI assistants are changing how I approach coding. Am I becoming more creative or just more efficient? 🤔 How is this affecting you?",
+              "post_text": "AI assistants are changing how I approach coding. I'm definitely becoming more efficient, not sure about creativity yet 🤔",
               "hashtags": "#AI #coding #futureofwork #thoughts"
+            }}
+            {{
+              "post_text": "Been using AI for brainstorming lately. It's like having a tireless creative partner that never judges your weird ideas ✨",
+              "hashtags": "#AI #creativity #productivity #tools"
+            }}
+            {{
+              "post_text": "The human-AI collaboration feels so natural now. We're not replacing humans, we're augmenting them. That's the real revolution.",
+              "hashtags": "#AI #future #collaboration #tech"
             }}
             """
             return await self.generate_structured_post_content(ai_prompt, model_key='powerful')
 
         async def fallback_creator():
             current_time = datetime.now().strftime("%H:%M")
-            return {
-                "post_text": f"🤖 AI thoughts ({current_time}):\n\nHow has artificial intelligence changed your work in the past year? Share your experience!",
-                "hashtags": "#AI #experience #technology"
-            }
+            fallback_options = [
+                {
+                    "post_text": f"🤖 AI thoughts ({current_time}):\n\nArtificial intelligence is reshaping our work. The possibilities are endless! ✨",
+                    "hashtags": "#AI #future #technology"
+                },
+                {
+                    "post_text": f"💭 Tech reflection ({current_time}):\n\nEvery tool we use shapes how we think. AI is no exception.",
+                    "hashtags": "#AI #productivity #mindset"
+                },
+                {
+                    "post_text": f"🔬 Daily observation ({current_time}):\n\nWatching AI evolve is like witnessing the birth of a new species.",
+                    "hashtags": "#AI #evolution #technology"
+                }
+            ]
+            return random.choice(fallback_options)
 
         return await self._create_post_with_image_generation(
             content_creator,
@@ -1014,22 +1041,37 @@ class AutonomousBlueskyBotV2:
         async def content_creator():
             ai_prompt = f"""
             Create a social media post based on the list idea: "{selected_theme}".
-            Provide the output in JSON format. The "post_text" (in English, max 280 chars) should have a title, a short numbered list, and a concluding question. The "hashtags" (in English) should be 3-4 relevant tags.
+            Provide the output in JSON format. The "post_text" (in English, max 280 chars) should have a title, a short numbered list, and a natural ending (statement, emoji, question, or observation). The "hashtags" (in English) should be 3-4 relevant tags.
 
-            Example for "useful dev tools":
+            Examples for "useful dev tools":
             {{
-              "post_text": "🔥 TOP-3 tools for code\\n\\n1️⃣ VS Code - best editor\\n2️⃣ Git - version control\\n3️⃣ Postman - API testing\\n\\nWhat do you use?",
+              "post_text": "🔥 TOP-3 tools for code\\n\\n1️⃣ VS Code - best editor\\n2️⃣ Git - version control\\n3️⃣ Postman - API testing\\n\\nGame changers for productivity! 🚀",
               "hashtags": "#tools #development #useful #coding"
+            }}
+            {{
+              "post_text": "📚 Must-read books for developers:\\n\\n1️⃣ Clean Code\\n2️⃣ Design Patterns\\n3️⃣ Pragmatic Programmer\\n\\nClassics never get old ✨",
+              "hashtags": "#books #learning #development #career"
             }}
             """
             return await self.generate_structured_post_content(ai_prompt, model_key='creative')
 
         async def fallback_creator():
             current_time = datetime.now().strftime("%H:%M")
-            return {
-                "post_text": f"📋 Daily developer list ({current_time}):\\n\\n1. Write code\\n2. Drink coffee\\n3. Debug\\n4. Repeat\\n\\nWhich step takes you longest?",
-                "hashtags": "#list #productivity #dev #coding"
-            }
+            fallback_options = [
+                {
+                    "post_text": f"📋 Daily developer routine ({current_time}):\\n\\n1. Write code\\n2. Drink coffee\\n3. Debug\\n4. Repeat\\n\\nThe eternal cycle! ☕",
+                    "hashtags": "#list #productivity #dev #coding"
+                },
+                {
+                    "post_text": f"🔧 Essential tools ({current_time}):\\n\\n1. Good IDE\\n2. Version control\\n3. Stack Overflow\\n\\nBasics that never fail 💪",
+                    "hashtags": "#tools #development #basics #tech"
+                },
+                {
+                    "post_text": f"💡 Simple truths ({current_time}):\\n\\n1. Code works mysteriously\\n2. Bugs appear from nowhere\\n3. Coffee fixes everything\\n\\nSoftware development reality 😅",
+                    "hashtags": "#humor #coding #life #truth"
+                }
+            ]
+            return random.choice(fallback_options)
 
         return await self._create_post_with_image_generation(
             content_creator,
@@ -1092,7 +1134,7 @@ class AutonomousBlueskyBotV2:
         try:
             # Генерируем контент с фокусом на вопросы и наблюдения
             import random
-            content_type = "question_starter" if random.random() < 0.6 else "observation"
+            content_type = "question_starter" if random.random() < 0.3 else "observation"  # Снижаем долю вопросов с 60% до 30%
             dynamic_content = await self.dynamic_generator.generate_dynamic_content(content_type)
             
             async def content_creator():
@@ -1901,6 +1943,11 @@ class AutonomousBlueskyBotV2:
                 if cycle_count % 50 == 0 and cycle_count > 0:
                     logger.info("🔧 Запуск периодической диагностики RSS...")
                     await self.test_rss_feeds_diagnostics()
+                
+                # Анализ разнообразия постов каждые 30 циклов (примерно раз в 5-6 часов)
+                if cycle_count % 30 == 0 and cycle_count > 0:
+                    logger.info("📊 Запуск анализа разнообразия постов...")
+                    await self.analyze_post_diversity()
                 
                 # Логируем статистику Pollinations.AI
                 ai_stats = self.pollinations_ai.get_statistics()
@@ -2729,6 +2776,124 @@ class AutonomousBlueskyBotV2:
                 logger.info(f"   - {rec}")
         
         return diagnostics
+
+    async def analyze_post_diversity(self) -> Dict[str, any]:
+        """Анализирует разнообразие созданных постов для выявления паттернов"""
+        logger.info("📊 Запуск анализа разнообразия постов...")
+        
+        analysis = {
+            'total_posts': len(self.memory.successful_posts),
+            'posts_with_questions': 0,
+            'posts_with_statements': 0,
+            'posts_with_observations': 0,
+            'posts_with_emojis': 0,
+            'question_patterns': [],
+            'statement_patterns': [],
+            'diversity_score': 0.0,
+            'recommendations': []
+        }
+        
+        if not self.memory.successful_posts:
+            logger.warning("⚠️ Нет постов для анализа")
+            return analysis
+        
+        # Анализируем последние 50 постов (или все если меньше)
+        recent_posts = self.memory.successful_posts[-50:]
+        
+        for post in recent_posts:
+            text = post.get('text', '')
+            if not text:
+                continue
+                
+            # Проверяем наличие вопросов
+            if '?' in text:
+                analysis['posts_with_questions'] += 1
+                # Извлекаем вопросительные части
+                questions = [q.strip() for q in text.split('?') if q.strip()]
+                analysis['question_patterns'].extend(questions[-1:])  # Берем последний вопрос
+            else:
+                # Это утверждение или наблюдение
+                if any(word in text.lower() for word in ['noticed', 'observed', 'watching', 'seeing', 'interesting']):
+                    analysis['posts_with_observations'] += 1
+                else:
+                    analysis['posts_with_statements'] += 1
+                    
+                # Извлекаем паттерны утверждений (последнее предложение)
+                sentences = text.split('.')
+                if len(sentences) > 1:
+                    analysis['statement_patterns'].append(sentences[-2].strip() if sentences[-1].strip() == '' else sentences[-1].strip())
+                
+            # Проверяем эмодзи
+            emoji_count = len(re.findall(r'[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF\U0001F1E0-\U0001F1FF\U00002700-\U000027BF]', text))
+            if emoji_count > 0:
+                analysis['posts_with_emojis'] += 1
+        
+        total_analyzed = len(recent_posts)
+        
+        # Вычисляем разнообразие
+        question_ratio = analysis['posts_with_questions'] / total_analyzed if total_analyzed > 0 else 0
+        statement_ratio = analysis['posts_with_statements'] / total_analyzed if total_analyzed > 0 else 0
+        observation_ratio = analysis['posts_with_observations'] / total_analyzed if total_analyzed > 0 else 0
+        emoji_ratio = analysis['posts_with_emojis'] / total_analyzed if total_analyzed > 0 else 0
+        
+        # Идеальное разнообразие: 30% вопросы, 50% утверждения, 20% наблюдения
+        ideal_question_ratio = 0.3
+        ideal_statement_ratio = 0.5
+        ideal_observation_ratio = 0.2
+        
+        # Вычисляем отклонение от идеального распределения
+        question_deviation = abs(question_ratio - ideal_question_ratio)
+        statement_deviation = abs(statement_ratio - ideal_statement_ratio)
+        observation_deviation = abs(observation_ratio - ideal_observation_ratio)
+        
+        # Счет разнообразия (0-1, где 1 = идеальное разнообразие)
+        diversity_score = 1.0 - (question_deviation + statement_deviation + observation_deviation) / 3
+        analysis['diversity_score'] = max(0.0, diversity_score)
+        
+        # Формируем рекомендации
+        if question_ratio > 0.6:
+            analysis['recommendations'].append("🔥 КРИТИЧНО: Слишком много вопросов! Нужно больше утверждений и наблюдений")
+        elif question_ratio > 0.4:
+            analysis['recommendations'].append("⚠️ Много вопросов. Рекомендуется снизить долю до 30%")
+        elif question_ratio < 0.1:
+            analysis['recommendations'].append("💡 Слишком мало вопросов. Можно добавить немного интерактивности")
+            
+        if statement_ratio < 0.3:
+            analysis['recommendations'].append("📝 Недостаточно четких утверждений. Нужно больше уверенности в постах")
+            
+        if emoji_ratio < 0.3:
+            analysis['recommendations'].append("😊 Мало эмодзи. Можно добавить больше эмоциональности")
+        elif emoji_ratio > 0.8:
+            analysis['recommendations'].append("😅 Слишком много эмодзи. Можно сделать часть постов более серьезными")
+        
+        # Логируем результаты
+        logger.info(f"📊 Анализ разнообразия завершен:")
+        logger.info(f"   📈 Всего постов проанализировано: {total_analyzed}")
+        logger.info(f"   ❓ Посты с вопросами: {analysis['posts_with_questions']} ({question_ratio:.1%})")
+        logger.info(f"   💬 Посты с утверждениями: {analysis['posts_with_statements']} ({statement_ratio:.1%})")
+        logger.info(f"   👁️ Посты с наблюдениями: {analysis['posts_with_observations']} ({observation_ratio:.1%})")
+        logger.info(f"   😊 Посты с эмодзи: {analysis['posts_with_emojis']} ({emoji_ratio:.1%})")
+        logger.info(f"   🎯 Оценка разнообразия: {analysis['diversity_score']:.2f}/1.0")
+        
+        if analysis['recommendations']:
+            logger.info("💡 Рекомендации:")
+            for rec in analysis['recommendations']:
+                logger.info(f"   - {rec}")
+        
+        # Примеры частых паттернов
+        if len(analysis['question_patterns']) > 0:
+            frequent_questions = Counter(analysis['question_patterns']).most_common(3)
+            logger.info("❓ Частые вопросительные паттерны:")
+            for pattern, count in frequent_questions:
+                logger.info(f"   - '{pattern[:50]}...' ({count} раз)")
+                
+        if len(analysis['statement_patterns']) > 0:
+            frequent_statements = Counter(analysis['statement_patterns']).most_common(3)
+            logger.info("💬 Частые паттерны утверждений:")
+            for pattern, count in frequent_statements:
+                logger.info(f"   - '{pattern[:50]}...' ({count} раз)")
+        
+        return analysis
 
 async def main():
     # Загружаем конфигурацию из переменных окружения

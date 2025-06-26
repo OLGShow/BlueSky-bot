@@ -185,3 +185,113 @@ The president and his Pentagon chi...
 2025-06-26 20:20:47,290 - httpx - INFO - HTTP Request: POST https://rooter.us-west.host.bsky.network/xrpc/com.atproto.repo.createRecord "HTTP/1.1 200 OK"
 2025-06-26 20:20:47,291 - __main__ - INFO - 🔄 Репост выполнен! (score: 0.35, #1/4)
 2025-06-26 20:20:47,291 - __main__ - INFO - 🚫 Автоматические комментарии отключены (BlueSky compliance)
+2025-06-26 20:20:57,710 - __main__ - INFO -       📊 Детали расчета релевантности:
+2025-06-26 20:20:57,710 - __main__ - INFO -         Ключевые слова: [] (+0.00)
+2025-06-26 20:20:57,710 - __main__ - INFO -         Хештеги: 0.00
+2025-06-26 20:20:57,710 - __main__ - INFO -         Вопросы: 0.00
+2025-06-26 20:20:57,711 - __main__ - INFO -         Вовлеченность: 0 лайков + 0 репостов = 0 (+0.00)
+2025-06-26 20:20:57,711 - __main__ - INFO -         Итоговый score: 0.00
+2025-06-26 20:20:57,711 - __main__ - INFO - 🔍 Пост #17 от @fifilaroach.bsky.social: score=0.00
+2025-06-26 20:20:57,711 - __main__ - INFO -     Текст: Read.
+2025-06-26 20:20:57,711 - __main__ - INFO -     ⏭️ Релевантность слишком низкая (0.00 < 0.25)
+2025-06-26 20:20:57,711 - __main__ - INFO -       📊 Детали расчета релевантности:
+2025-06-26 20:20:57,711 - __main__ - INFO -         Ключевые слова: ['art', 'ai', 'media', 'pet'] (+0.20)
+2025-06-26 20:20:57,711 - __main__ - INFO -         Хештеги: 0.00
+2025-06-26 20:20:57,711 - __main__ - INFO -         Вопросы: 0.00
+2025-06-26 20:20:57,711 - __main__ - INFO -         Вовлеченность: 176 лайков + 41 репостов = 258 (+0.15)
+2025-06-26 20:20:57,711 - __main__ - INFO -         Итоговый score: 0.35
+2025-06-26 20:20:57,712 - __main__ - INFO - 🔍 Пост #18 от @gregsargent.bsky.social: score=0.35
+2025-06-26 20:20:57,712 - __main__ - INFO -     Текст: It's getting harder for Pete Hegeth and Karoline Levitt to blame the US media and Deep State for rep...
+2025-06-26 20:20:57,712 - __main__ - INFO - 🎯 Достаточная релевантность! Действуем...
+2025-06-26 20:20:58,358 - httpx - INFO - HTTP Request: POST https://rooter.us-west.host.bsky.network/xrpc/com.atproto.repo.createRecord "HTTP/1.1 200 OK"
+2025-06-26 20:20:58,359 - __main__ - INFO - ❤️ Лайк поставлен!
+2025-06-26 20:21:05,952 - httpx - INFO - HTTP Request: POST https://rooter.us-west.host.bsky.network/xrpc/com.atproto.repo.createRecord "HTTP/1.1 200 OK"
+2025-06-26 20:21:05,953 - __main__ - INFO - 🔄 Репост выполнен! (score: 0.35, #2/4)
+2025-06-26 20:21:05,953 - __main__ - INFO - 🚫 Автоматические комментарии отключены (BlueSky compliance)
+2025-06-26 20:21:14,207 - __main__ - INFO - 📊 Итого проанализировано: 18 постов
+2025-06-26 20:21:14,207 - __main__ - INFO - 🎯 Высокая релевантность: 5 постов
+2025-06-26 20:21:14,207 - __main__ - INFO - ❤️ Лайков поставлено: 5
+2025-06-26 20:21:14,207 - __main__ - INFO - 🔄 Репостов сделано: 2
+2025-06-26 20:21:14,208 - __main__ - INFO - 💬 Комментарии: ОТКЛЮЧЕНЫ (BlueSky compliance)
+2025-06-26 20:21:14,208 - __main__ - INFO - 📈 Показатели эффективности:
+2025-06-26 20:21:14,208 - __main__ - INFO -    📊 Процент релевантных постов: 27.8%
+2025-06-26 20:21:14,208 - __main__ - INFO -    ❤️ Процент лайков: 27.8%
+2025-06-26 20:21:14,208 - __main__ - INFO -    🔄 Процент репостов: 11.1%
+2025-06-26 20:21:14,208 - __main__ - INFO -    💬 Процент комментариев: 0.0%
+2025-06-26 20:21:14,208 - __main__ - INFO -    🎯 Конверсия релевантности: 100.0%
+2025-06-26 20:21:14,902 - httpx - INFO - HTTP Request: GET https://rooter.us-west.host.bsky.network/xrpc/app.bsky.actor.getSuggestions?limit=30 "HTTP/1.1 200 OK"
+2025-06-26 20:21:14,904 - __main__ - INFO - 👥 Получено 29 рекомендаций пользователей
+2025-06-26 20:21:15,160 - httpx - INFO - HTTP Request: GET https://rooter.us-west.host.bsky.network/xrpc/app.bsky.actor.getProfile?actor=did%3Aplc%3Aompb3y32ndngbqkbeqzhxsjz "HTTP/1.1 200 OK"
+2025-06-26 20:21:15,161 - __main__ - INFO - 🔍 Анализ #1: @seniorcancel25.bsky.social
+2025-06-26 20:21:15,161 - __main__ - INFO -     Описание: Standup Comedian / Born Again
+
+Minister of the Gospel.
+
+Democrat 🔵 / Anti-MAGA / Anti-Fascism💙
+
+#Dom
+2025-06-26 20:21:15,162 - __main__ - INFO -     Подписчики: 1752, Подписки: 3274, Посты: 17
+2025-06-26 20:21:15,162 - __main__ - INFO -     🔍 Анализ критериев:
+2025-06-26 20:21:15,162 - __main__ - INFO -       Найденные ключевые слова: ['ai'] (score: 1)
+2025-06-26 20:21:15,162 - __main__ - INFO -       ✅ Итоговое решение: 1 ключевых слов >= 1
+2025-06-26 20:21:15,162 - __main__ - INFO -     Решение: ✅ Подписаться
+2025-06-26 20:21:15,396 - httpx - INFO - HTTP Request: POST https://rooter.us-west.host.bsky.network/xrpc/com.atproto.repo.createRecord "HTTP/1.1 200 OK"
+2025-06-26 20:21:15,397 - __main__ - INFO - ➕ Подписка на @seniorcancel25.bsky.social выполнена!
+2025-06-26 20:21:19,167 - __main__ - INFO - 📊 Стратегия рекомендаций:
+2025-06-26 20:21:19,167 - __main__ - INFO -     Проанализировано: 1 пользователей
+2025-06-26 20:21:19,167 - __main__ - INFO -     Подписок сделано: 1
+2025-06-26 20:21:19,167 - __main__ - INFO - 🎨 Создание качественного поста...
+2025-06-26 20:21:19,168 - dynamic_content_system - INFO - 🔍 Fetching trending topics from BlueSky...
+2025-06-26 20:21:19,503 - httpx - INFO - HTTP Request: GET https://rooter.us-west.host.bsky.network/xrpc/app.bsky.feed.getTimeline?limit=100 "HTTP/1.1 200 OK"
+2025-06-26 20:21:19,944 - dynamic_content_system - INFO - ✅ Found 10 trending hashtags, 10 topics
+2025-06-26 20:21:30,506 - pollinations_adapter - INFO - ✅ Успешный ответ от Pollinations (183 символов)
+2025-06-26 20:21:30,506 - __main__ - INFO - 🎨 Создан промпт для изображения: Digital art of abstract human hands interacting with floating AI icons and luminous gears, vibrant colors, dynamic composition, conveying a sense of empowerment and daily inspiration.
+2025-06-26 20:21:40,597 - pollinations_adapter - INFO - ✅ Успешно сгенерировано изображение (138275 байт)
+2025-06-26 20:21:40,598 - __main__ - INFO - ✅ Изображение для поста типа 'observation' сгенерировано.
+2025-06-26 20:21:42,181 - httpx - INFO - HTTP Request: POST https://rooter.us-west.host.bsky.network/xrpc/com.atproto.repo.uploadBlob "HTTP/1.1 200 OK"
+2025-06-26 20:21:42,182 - __main__ - INFO - ✅ Изображение успешно загружено в BlueSky
+2025-06-26 20:21:42,182 - __main__ - INFO - 📊 Оценка качества поста: 0.70/1.0
+2025-06-26 20:21:43,314 - httpx - INFO - HTTP Request: POST https://rooter.us-west.host.bsky.network/xrpc/com.atproto.repo.createRecord "HTTP/1.1 200 OK"
+2025-06-26 20:21:43,314 - __main__ - INFO - ✅ Опубликован качественный пост #1: Something caught my attention: AI tools for everyday productivity is becoming mo...
+2025-06-26 20:21:43,314 - __main__ - INFO - 📊 Обновление постов реальными метриками...
+2025-06-26 20:21:43,567 - httpx - INFO - HTTP Request: GET https://rooter.us-west.host.bsky.network/xrpc/app.bsky.feed.getPostThread?uri=at%3A%2F%2Fdid%3Aplc%3Ado6d2pp32wvg4na5g7k4sie2%2Fapp.bsky.feed.post%2F3lsitfw64un24 "HTTP/1.1 200 OK"
+2025-06-26 20:21:43,568 - __main__ - INFO - 📊 Метрики поста fw64un24...
+2025-06-26 20:21:43,569 - __main__ - INFO -    ❤️ Лайки: 1
+2025-06-26 20:21:43,569 - __main__ - INFO -    🔄 Репосты: 0
+2025-06-26 20:21:43,569 - __main__ - INFO -    💬 Комментарии: 0
+2025-06-26 20:21:43,569 - __main__ - INFO -    📈 Общая вовлеченность: 1
+2025-06-26 20:21:44,827 - httpx - INFO - HTTP Request: GET https://rooter.us-west.host.bsky.network/xrpc/app.bsky.feed.getPostThread?uri=at%3A%2F%2Fdid%3Aplc%3Ado6d2pp32wvg4na5g7k4sie2%2Fapp.bsky.feed.post%2F3lsiwlbk6vi2q "HTTP/1.1 200 OK"
+2025-06-26 20:21:44,828 - __main__ - INFO - 📊 Метрики поста lbk6vi2q...
+2025-06-26 20:21:44,828 - __main__ - INFO -    ❤️ Лайки: 0
+2025-06-26 20:21:44,828 - __main__ - INFO -    🔄 Репосты: 0
+2025-06-26 20:21:44,828 - __main__ - INFO -    💬 Комментарии: 0
+2025-06-26 20:21:44,828 - __main__ - INFO -    📈 Общая вовлеченность: 0
+2025-06-26 20:21:46,086 - httpx - INFO - HTTP Request: GET https://rooter.us-west.host.bsky.network/xrpc/app.bsky.feed.getPostThread?uri=at%3A%2F%2Fdid%3Aplc%3Ahyhxwu377nhns3dprjqhjouj%2Fapp.bsky.feed.post%2F3lsiy6e3fo32c "HTTP/1.1 200 OK"
+2025-06-26 20:21:46,087 - __main__ - INFO - 📊 Метрики поста 6e3fo32c...
+2025-06-26 20:21:46,087 - __main__ - INFO -    ❤️ Лайки: 0
+2025-06-26 20:21:46,087 - __main__ - INFO -    🔄 Репосты: 0
+2025-06-26 20:21:46,087 - __main__ - INFO -    💬 Комментарии: 0
+2025-06-26 20:21:46,087 - __main__ - INFO -    📈 Общая вовлеченность: 0
+2025-06-26 20:21:47,351 - httpx - INFO - HTTP Request: GET https://rooter.us-west.host.bsky.network/xrpc/app.bsky.feed.getPostThread?uri=at%3A%2F%2Fdid%3Aplc%3Ahyhxwu377nhns3dprjqhjouj%2Fapp.bsky.feed.post%2F3lsjn7rli342k "HTTP/1.1 200 OK"
+2025-06-26 20:21:47,352 - __main__ - INFO - 📊 Метрики поста 7rli342k...
+2025-06-26 20:21:47,352 - __main__ - INFO -    ❤️ Лайки: 0
+2025-06-26 20:21:47,352 - __main__ - INFO -    🔄 Репосты: 0
+2025-06-26 20:21:47,352 - __main__ - INFO -    💬 Комментарии: 0
+2025-06-26 20:21:47,352 - __main__ - INFO -    📈 Общая вовлеченность: 0
+2025-06-26 20:21:48,357 - __main__ - INFO - ✅ Обновлено метрик для 1 постов, пропущено 3
+2025-06-26 20:21:48,358 - __main__ - INFO - 📈 Обновлены весы контента: {'comment': 17, 'general': 6}
+2025-06-26 20:21:48,358 - __main__ - INFO - 🤝 Средний балл отношений: 1.15
+2025-06-26 20:21:48,359 - __main__ - INFO - 💾 Память сохранена (включая кэши защиты от дубликатов)
+2025-06-26 20:21:48,359 - __main__ - INFO - 📊 Статистика сессии: {'posts_created': 1, 'likes_given': 5, 'reposts_made': 2, 'follows_made': 1, 'comments_made': 0, 'errors': 0}
+2025-06-26 20:21:48,359 - __main__ - INFO - 📊 Постов за день: 1/10
+2025-06-26 20:21:48,359 - __main__ - INFO - 🧹 Очищены старые хеши: 6 -> 6, URLs: 1 -> 2
+2025-06-26 20:21:48,359 - __main__ - INFO - 🧹 Очищены записи о взаимодействиях:
+2025-06-26 20:21:48,359 - __main__ - INFO -    📝 Прокомментированные посты: 17 -> 0
+2025-06-26 20:21:48,359 - __main__ - INFO -    💬 Недавние комментарии: 17 -> 10
+2025-06-26 20:21:48,359 - __main__ - INFO -    ❤️ Лайкнутые посты: 57 -> 0
+2025-06-26 20:21:48,359 - __main__ - INFO -    🔄 Репостнутые посты: 7 -> 0
+2025-06-26 20:21:48,360 - __main__ - INFO -    👥 Подписки сохранены: 10 записей
+2025-06-26 20:21:48,360 - __main__ - INFO - 🤖 Статистика AI:
+2025-06-26 20:21:48,360 - __main__ - INFO -    📈 Запросы: 2/2 (100.0%)
+2025-06-26 20:21:48,360 - __main__ - INFO -    🔧 Модели: ['openai-large', 'image_dall-e-3']
+2025-06-26 20:21:48,360 - __main__ - INFO - ⏸️ Пауза 74.5 минут до следующего цикла

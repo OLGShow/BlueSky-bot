@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  bluesky-bot:
+    build: .
+    container_name: bluesky-bot
+    restart: unless-stopped
+    environment:
+      - BLUESKY_HANDLE=${BLUESKY_HANDLE}
+      - BLUESKY_PASSWORD=${BLUESKY_PASSWORD}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - LOG_LEVEL=INFO
+      - PYTHONPATH=/app
+    volumes:
+      # Монтируем память бота и логи на хост
+      - ./data:/app/data
+      - ./logs:/app/logs
+    working_dir: /app
+    command: python3 bluesky_bot_v2.py
+    networks:
+      - bluesky-net
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import os; exit(0 if os.path.exists('bot.log') else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  bluesky-net:
+    driver: bridge
+
+volumes:
+  bot-data:
+    driver: local
+  bot-logs:
+    driver: local 

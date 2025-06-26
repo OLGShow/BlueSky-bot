@@ -1,0 +1,44 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+.venv/
+.env.local
+.env.*.local
+
+# Bot data
+bot_memory.pkl
+bot.log
+*.log
+logs/
+data/
+
+# Development
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation
+README.md
+LICENSE
+docs/
+
+# Scripts (не нужны в контейнере)
+install.sh
+manage.sh
+monitor.sh
+update.sh
+start_bot.sh 

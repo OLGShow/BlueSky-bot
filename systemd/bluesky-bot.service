@@ -1,0 +1,43 @@
+[Unit]
+Description=BlueSky Bot v2.1 - Automated Social Media Bot
+Documentation=https://github.com/YOUR_USERNAME/BlueSky-Bot
+After=network.target network-online.target
+Wants=network-online.target
+RequiresMountsFor=/home
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/BlueSky-Bot
+EnvironmentFile=/home/ubuntu/BlueSky-Bot/.env
+
+# Команда запуска
+ExecStart=/home/ubuntu/BlueSky-Bot/venv/bin/python /home/ubuntu/BlueSky-Bot/bluesky_bot_v2.py
+
+# Автоматический перезапуск
+Restart=always
+RestartSec=10
+StartLimitBurst=5
+StartLimitInterval=60
+
+# Логирование
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bluesky-bot
+
+# Безопасность
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/BlueSky-Bot
+MemoryMax=512M
+
+# Сигналы
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target 

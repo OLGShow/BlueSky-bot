@@ -1,525 +1,535 @@
 #!/bin/bash
 
-# =================================================================
-# BlueSky Bot Auto-Installer для Ubuntu Server 24.04.2
-# Автоматическая установка и настройка бота одной командой
-# =================================================================
+# BlueSky Bot - Автоматическая установка для Ubuntu Server 24.04.2
+# Версия: 3.0 - Полностью автоматизированная установка
 
-set -e  # Останавливаем при любой ошибке
+set -e  # Выход при любой ошибке
 
 # Цвета для вывода
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
+WHITE='\033[1;37m'
 NC='\033[0m' # No Color
+
+# Конфигурация
+INSTALL_DIR="$HOME/BlueSky-Bot"
+SERVICE_NAME="bluesky-bot"
+REPO_URL="https://github.com/OLGShow/BlueSky-bot.git"
+PYTHON_VERSION="3.12"
 
 # Функции для красивого вывода
 print_header() {
-    echo -e "\n${BLUE}=== $1 ===${NC}\n"
+    echo -e "${PURPLE}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${PURPLE}║${WHITE}                    BlueSky Bot Installer v3.0                ║${NC}"
+    echo -e "${PURPLE}║${CYAN}            Автоматическая установка для Ubuntu Server         ║${NC}"
+    echo -e "${PURPLE}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+}
+
+print_step() {
+    echo -e "${BLUE}[STEP]${NC} $1"
 }
 
 print_success() {
-    echo -e "${GREEN}✅ $1${NC}"
+    echo -e "${GREEN}[✓]${NC} $1"
 }
 
 print_warning() {
-    echo -e "${YELLOW}⚠️  $1${NC}"
+    echo -e "${YELLOW}[⚠]${NC} $1"
 }
 
 print_error() {
-    echo -e "${RED}❌ $1${NC}"
+    echo -e "${RED}[✗]${NC} $1"
 }
 
-print_info() {
-    echo -e "${BLUE}📋 $1${NC}"
-}
-
-# Проверка запуска от имени пользователя (НЕ root)
-check_user() {
-    if [ "$EUID" -eq 0 ]; then
-        print_error "Не запускайте скрипт от имени root! Используйте обычного пользователя."
-        echo "Выполните: curl -sSL https://raw.githubusercontent.com/YOUR_USERNAME/BlueSky-Bot/main/install.sh | bash"
+# Проверка системных требований
+check_requirements() {
+    print_step "Проверка системных требований..."
+    
+    # Проверяем Ubuntu
+    if ! grep -q "Ubuntu" /etc/os-release 2>/dev/null; then
+        print_error "Эта установка предназначена для Ubuntu Server!"
         exit 1
     fi
-}
-
-# Проверка операционной системы
-check_os() {
-    print_header "Проверка операционной системы"
     
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        if [[ "$ID" == "ubuntu" && "$VERSION_ID" == "24.04" ]]; then
-            print_success "Ubuntu 24.04 обнаружена"
-        else
-            print_warning "Обнаружена $PRETTY_NAME (рекомендуется Ubuntu 24.04)"
-        fi
+    # Проверяем версию Ubuntu
+    UBUNTU_VERSION=$(lsb_release -rs 2>/dev/null || echo "unknown")
+    if [[ "$UBUNTU_VERSION" < "20.04" ]]; then
+        print_warning "Рекомендуется Ubuntu 20.04 или новее (найдено: $UBUNTU_VERSION)"
     else
-        print_warning "Не удалось определить операционную систему"
+        print_success "Ubuntu $UBUNTU_VERSION"
+    fi
+    
+    # Проверяем права sudo
+    if [ "$EUID" -eq 0 ]; then
+        print_error "Не запускайте под root! Используйте обычного пользователя с sudo."
+        exit 1
+    fi
+    
+    if ! sudo -n true 2>/dev/null; then
+        print_error "Пользователь должен иметь права sudo без запроса пароля"
+        print_error "Выполните: echo '$USER ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/$USER"
+        exit 1
+    fi
+    
+    print_success "Права пользователя проверены"
+    
+    # Проверяем доступность интернета
+    if ! ping -c 1 8.8.8.8 >/dev/null 2>&1; then
+        print_error "Нет подключения к интернету!"
+        exit 1
+    fi
+    
+    print_success "Подключение к интернету активно"
+    
+    # Проверяем свободное место на диске (минимум 2GB)
+    AVAILABLE_SPACE=$(df "$HOME" | awk 'NR==2 {print $4}')
+    if [ "$AVAILABLE_SPACE" -lt 2097152 ]; then
+        print_warning "Мало свободного места на диске (< 2GB)"
+    else
+        print_success "Достаточно свободного места на диске"
     fi
 }
 
 # Установка системных зависимостей
-install_system_deps() {
-    print_header "Установка системных зависимостей"
+install_system_dependencies() {
+    print_step "Обновление системы и установка зависимостей..."
     
-    # Обновляем пакеты
-    print_info "Обновление списка пакетов..."
-    sudo apt update
+    # Обновляем списки пакетов
+    sudo apt update -qq
     
     # Устанавливаем необходимые пакеты
-    print_info "Установка системных пакетов..."
     sudo apt install -y \
-        python3 \
-        python3-pip \
-        python3-venv \
-        python3-dev \
-        git \
+        software-properties-common \
+        apt-transport-https \
+        ca-certificates \
         curl \
+        wget \
+        git \
         build-essential \
         libssl-dev \
         libffi-dev \
-        software-properties-common \
-        tmux \
+        python3-dev \
+        python3-pip \
+        python3-venv \
+        systemd \
+        logrotate \
+        nano \
         htop \
-        nano
+        unzip
     
     print_success "Системные зависимости установлены"
 }
 
-# Клонирование репозитория
-clone_repository() {
-    print_header "Клонирование репозитория"
+# Установка Python 3.12
+install_python() {
+    print_step "Установка Python $PYTHON_VERSION..."
     
-    BOT_DIR="$HOME/BlueSky-Bot"
-    
-    if [ -d "$BOT_DIR" ]; then
-        print_warning "Директория $BOT_DIR уже существует"
-        read -p "Удалить существующую установку и начать заново? (y/N): " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            rm -rf "$BOT_DIR"
-            print_info "Старая установка удалена"
-        else
-            print_error "Установка отменена"
-            exit 1
-        fi
+    # Проверяем, есть ли уже нужная версия Python
+    if command -v python3.12 >/dev/null 2>&1; then
+        print_success "Python 3.12 уже установлен"
+        return
     fi
     
-    # Здесь замените YOUR_USERNAME на ваш GitHub username
-    REPO_URL="https://github.com/YOUR_USERNAME/BlueSky-Bot.git"
+    # Добавляем PPA для новых версий Python
+    sudo add-apt-repository ppa:deadsnakes/ppa -y
+    sudo apt update -qq
     
-    print_info "Клонирование из $REPO_URL..."
-    git clone "$REPO_URL" "$BOT_DIR"
-    cd "$BOT_DIR"
+    # Устанавливаем Python 3.12
+    sudo apt install -y python3.12 python3.12-venv python3.12-dev
     
-    print_success "Репозиторий клонирован в $BOT_DIR"
+    # Проверяем установку
+    if python3.12 --version >/dev/null 2>&1; then
+        print_success "Python 3.12 успешно установлен"
+    else
+        print_error "Ошибка установки Python 3.12"
+        exit 1
+    fi
 }
 
-# Создание виртуального окружения Python
-setup_python_env() {
-    print_header "Настройка Python окружения"
+# Клонирование репозитория
+clone_repository() {
+    print_step "Клонирование репозитория..."
     
-    cd "$HOME/BlueSky-Bot"
+    # Удаляем старую папку если существует
+    if [ -d "$INSTALL_DIR" ]; then
+        print_warning "Папка $INSTALL_DIR уже существует. Удаляем..."
+        rm -rf "$INSTALL_DIR"
+    fi
+    
+    # Клонируем репозиторий
+    git clone "$REPO_URL" "$INSTALL_DIR"
+    cd "$INSTALL_DIR"
+    
+    print_success "Репозиторий клонирован в $INSTALL_DIR"
+}
+
+# Настройка Python виртуального окружения
+setup_python_environment() {
+    print_step "Создание Python виртуального окружения..."
+    
+    cd "$INSTALL_DIR"
     
     # Создаем виртуальное окружение
-    print_info "Создание виртуального окружения..."
-    python3 -m venv venv
+    python3.12 -m venv venv
     
-    # Активируем окружение
+    # Активируем окружение и устанавливаем зависимости
     source venv/bin/activate
     
     # Обновляем pip
-    print_info "Обновление pip..."
-    pip install --upgrade pip setuptools wheel
+    pip install --upgrade pip
     
     # Устанавливаем зависимости
-    print_info "Установка Python зависимостей..."
-    pip install -r requirements.txt
-    
-    print_success "Python окружение настроено"
+    if [ -f "requirements.txt" ]; then
+        pip install -r requirements.txt
+        print_success "Python зависимости установлены"
+    else
+        print_error "Файл requirements.txt не найден!"
+        exit 1
+    fi
 }
 
-# Настройка конфигурации
-setup_configuration() {
-    print_header "Настройка конфигурации"
+# Создание конфигурационного файла
+create_config() {
+    print_step "Создание конфигурационного файла..."
     
-    cd "$HOME/BlueSky-Bot"
+    cd "$INSTALL_DIR"
     
-    # Создаем файл с переменными окружения
-    if [ ! -f ".env" ]; then
-        print_info "Создание файла конфигурации..."
-        cat > .env << EOF
-# BlueSky Bot Configuration
-# =========================
-
-# ОБЯЗАТЕЛЬНЫЕ НАСТРОЙКИ
-BLUESKY_HANDLE=your-bot.bsky.social
-BLUESKY_PASSWORD=your-app-password
-
-# ДОПОЛНИТЕЛЬНЫЕ НАСТРОЙКИ (опционально)
-OPENAI_API_KEY=your-openai-key-optional
-
-# СИСТЕМНЫЕ НАСТРОЙКИ
-PYTHONPATH=/home/$(whoami)/BlueSky-Bot
-LOG_LEVEL=INFO
-EOF
-        print_success "Файл .env создан"
+    # Копируем шаблон конфигурации
+    if [ -f "env.example" ]; then
+        cp env.example .env
+        print_success "Создан файл .env из шаблона"
+        print_warning "ВАЖНО: Отредактируйте файл $INSTALL_DIR/.env с вашими учетными данными!"
     else
-        print_warning "Файл .env уже существует"
+        print_error "Файл env.example не найден!"
+        exit 1
     fi
+}
+
+# Создание systemd службы
+create_systemd_service() {
+    print_step "Создание systemd службы..."
     
-    # Создаем скрипт запуска
-    cat > start_bot.sh << 'EOF'
+    # Создаем службу из шаблона
+    if [ -f "$INSTALL_DIR/systemd/bluesky-bot.service" ]; then
+        # Заменяем пути в шаблоне службы
+        sed "s|/home/ubuntu/BlueSky-Bot|$INSTALL_DIR|g" "$INSTALL_DIR/systemd/bluesky-bot.service" > "/tmp/$SERVICE_NAME.service"
+        sed -i "s|User=ubuntu|User=$USER|g" "/tmp/$SERVICE_NAME.service"
+        
+        # Копируем службу в systemd
+        sudo cp "/tmp/$SERVICE_NAME.service" "/etc/systemd/system/"
+        sudo systemctl daemon-reload
+        sudo systemctl enable "$SERVICE_NAME"
+        
+        print_success "Systemd служба создана и включена"
+    else
+        print_error "Шаблон службы не найден!"
+        exit 1
+    fi
+}
+
+# Создание скриптов управления
+create_management_scripts() {
+    print_step "Создание скриптов управления..."
+    
+    cd "$INSTALL_DIR"
+    
+    # Главный скрипт управления
+    cat > manage.sh << 'EOF'
 #!/bin/bash
 
-# BlueSky Bot Starter Script
-# ==========================
+SERVICE_NAME="bluesky-bot"
+INSTALL_DIR="$HOME/BlueSky-Bot"
 
-cd "$(dirname "$0")"
+case "$1" in
+    start)
+        echo "🚀 Запуск BlueSky Bot..."
+        sudo systemctl start $SERVICE_NAME
+        ;;
+    stop)
+        echo "🛑 Остановка BlueSky Bot..."
+        sudo systemctl stop $SERVICE_NAME
+        ;;
+    restart)
+        echo "🔄 Перезапуск BlueSky Bot..."
+        sudo systemctl restart $SERVICE_NAME
+        ;;
+    status)
+        echo "📊 Статус BlueSky Bot:"
+        sudo systemctl status $SERVICE_NAME --no-pager
+        ;;
+    logs)
+        echo "📋 Логи BlueSky Bot:"
+        sudo journalctl -u $SERVICE_NAME -f --no-pager
+        ;;
+    config)
+        echo "⚙️ Редактирование конфигурации..."
+        nano $INSTALL_DIR/.env
+        ;;
+    monitor)
+        echo "👁️ Мониторинг BlueSky Bot..."
+        $INSTALL_DIR/monitor.sh
+        ;;
+    update)
+        echo "🔄 Обновление BlueSky Bot..."
+        $INSTALL_DIR/update.sh
+        ;;
+    *)
+        echo "BlueSky Bot - Управление ботом"
+        echo "Использование: $0 {start|stop|restart|status|logs|config|monitor|update}"
+        exit 1
+        ;;
+esac
+EOF
 
-# Загружаем переменные окружения
-if [ -f ".env" ]; then
-    export $(cat .env | grep -v '^#' | xargs)
+    # Скрипт мониторинга
+    cat > monitor.sh << 'EOF'
+#!/bin/bash
+
+SERVICE_NAME="bluesky-bot"
+LOG_FILE="$HOME/BlueSky-Bot/bot.log"
+
+echo "🤖 BlueSky Bot - Мониторинг"
+echo "================================"
+
+# Статус службы
+if systemctl is-active --quiet $SERVICE_NAME; then
+    echo "✅ Служба: АКТИВНА"
+else
+    echo "❌ Служба: НЕАКТИВНА"
 fi
 
-# Активируем виртуальное окружение
+# Время работы
+UPTIME=$(systemctl show $SERVICE_NAME --property=ActiveEnterTimestamp --value)
+if [ ! -z "$UPTIME" ]; then
+    echo "⏰ Запущена: $UPTIME"
+fi
+
+# Использование ресурсов
+echo ""
+echo "📊 Использование ресурсов:"
+ps aux | grep "bluesky_bot_v2.py" | grep -v grep | awk '{printf "   CPU: %s%%, RAM: %s%%\n", $3, $4}'
+
+# Последние логи
+echo ""
+echo "📋 Последние логи:"
+if [ -f "$LOG_FILE" ]; then
+    tail -10 "$LOG_FILE"
+else
+    echo "   Файл лога не найден"
+fi
+
+echo ""
+echo "Для выхода нажмите Ctrl+C"
+echo "Для просмотра логов в реальном времени: ./manage.sh logs"
+EOF
+
+    # Скрипт обновления
+    cat > update.sh << 'EOF'
+#!/bin/bash
+
+SERVICE_NAME="bluesky-bot"
+INSTALL_DIR="$HOME/BlueSky-Bot"
+
+echo "🔄 Обновление BlueSky Bot..."
+
+# Останавливаем службу
+sudo systemctl stop $SERVICE_NAME
+
+# Сохраняем конфигурацию
+cp $INSTALL_DIR/.env /tmp/bluesky-bot.env.backup
+
+# Переходим в папку и обновляем
+cd $INSTALL_DIR
+git pull origin main
+
+# Восстанавливаем конфигурацию
+cp /tmp/bluesky-bot.env.backup $INSTALL_DIR/.env
+
+# Обновляем зависимости
 source venv/bin/activate
+pip install --upgrade -r requirements.txt
 
-# Запускаем бота
-echo "🤖 Запуск BlueSky Bot..."
-python3 bluesky_bot_v2.py
+# Перезапускаем службу
+sudo systemctl start $SERVICE_NAME
+
+echo "✅ Обновление завершено!"
 EOF
+
+    # Простой скрипт запуска
+    cat > start_bot.sh << 'EOF'
+#!/bin/bash
+cd "$HOME/BlueSky-Bot"
+source venv/bin/activate
+python bluesky_bot_v2.py
+EOF
+
+    # Делаем скрипты исполняемыми
+    chmod +x manage.sh monitor.sh update.sh start_bot.sh
     
-    chmod +x start_bot.sh
-    
-    print_success "Скрипт запуска создан"
+    print_success "Скрипты управления созданы"
 }
 
-# Создание systemd сервиса
-create_systemd_service() {
-    print_header "Создание systemd сервиса"
+# Создание глобальных команд
+create_global_commands() {
+    print_step "Создание глобальных команд..."
     
-    SERVICE_FILE="/etc/systemd/system/bluesky-bot.service"
+    # Создаем папку для локальных бинарников если не существует
+    mkdir -p "$HOME/.local/bin"
     
-    sudo tee "$SERVICE_FILE" > /dev/null << EOF
-[Unit]
-Description=BlueSky Bot
-After=network.target
-Wants=network.target
-
-[Service]
-Type=simple
-User=$(whoami)
-WorkingDirectory=$HOME/BlueSky-Bot
-EnvironmentFile=$HOME/BlueSky-Bot/.env
-ExecStart=$HOME/BlueSky-Bot/venv/bin/python $HOME/BlueSky-Bot/bluesky_bot_v2.py
-Restart=always
-RestartSec=10
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=bluesky-bot
-
-# Security settings
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=$HOME/BlueSky-Bot
-
-[Install]
-WantedBy=multi-user.target
+    # Добавляем в PATH если еще не добавлено
+    if ! echo "$PATH" | grep -q "$HOME/.local/bin"; then
+        echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
+        export PATH="$HOME/.local/bin:$PATH"
+    fi
+    
+    # Создаем символические ссылки
+    ln -sf "$INSTALL_DIR/manage.sh" "$HOME/.local/bin/bot-manage"
+    ln -sf "$INSTALL_DIR/monitor.sh" "$HOME/.local/bin/bot-monitor"
+    ln -sf "$INSTALL_DIR/update.sh" "$HOME/.local/bin/bot-update"
+    
+    # Создаем удобные команды
+    cat > "$HOME/.local/bin/bot-start" << EOF
+#!/bin/bash
+$INSTALL_DIR/manage.sh start
 EOF
+
+    cat > "$HOME/.local/bin/bot-stop" << EOF
+#!/bin/bash
+$INSTALL_DIR/manage.sh stop
+EOF
+
+    cat > "$HOME/.local/bin/bot-restart" << EOF
+#!/bin/bash
+$INSTALL_DIR/manage.sh restart
+EOF
+
+    cat > "$HOME/.local/bin/bot-status" << EOF
+#!/bin/bash
+$INSTALL_DIR/manage.sh status
+EOF
+
+    cat > "$HOME/.local/bin/bot-logs" << EOF
+#!/bin/bash
+$INSTALL_DIR/manage.sh logs
+EOF
+
+    cat > "$HOME/.local/bin/bot-config" << EOF
+#!/bin/bash
+$INSTALL_DIR/manage.sh config
+EOF
+
+    # Делаем команды исполняемыми
+    chmod +x "$HOME/.local/bin/bot-"*
     
-    # Перезагружаем systemd
-    sudo systemctl daemon-reload
-    
-    print_success "Systemd сервис создан"
-    print_info "Сервис будет доступен как: sudo systemctl start bluesky-bot"
+    print_success "Глобальные команды созданы"
 }
 
-# Настройка логирования
-setup_logging() {
-    print_header "Настройка логирования"
+# Настройка ротации логов
+setup_log_rotation() {
+    print_step "Настройка ротации логов..."
     
-    cd "$HOME/BlueSky-Bot"
-    
-    # Создаем директорию для логов
-    mkdir -p logs
-    
-    # Настраиваем ротацию логов
-    sudo tee /etc/logrotate.d/bluesky-bot > /dev/null << EOF
-$HOME/BlueSky-Bot/bot.log {
+    cat > "/tmp/bluesky-bot-logs" << EOF
+$INSTALL_DIR/bot.log {
     daily
     missingok
     rotate 7
     compress
     delaycompress
     notifempty
-    copytruncate
-    su $(whoami) $(whoami)
+    create 0644 $USER $USER
+    postrotate
+        systemctl reload $SERVICE_NAME > /dev/null 2>&1 || true
+    endscript
 }
 EOF
     
-    print_success "Логирование настроено (ротация каждые 7 дней)"
+    sudo mv "/tmp/bluesky-bot-logs" "/etc/logrotate.d/"
+    
+    print_success "Ротация логов настроена"
 }
 
-# Создание утилит управления
-create_management_scripts() {
-    print_header "Создание утилит управления"
-    
-    cd "$HOME/BlueSky-Bot"
-    
-    # Скрипт мониторинга
-    cat > monitor.sh << 'EOF'
-#!/bin/bash
-
-# BlueSky Bot Monitor
-# ===================
-
-BOT_DIR="$HOME/BlueSky-Bot"
-cd "$BOT_DIR"
-
-echo "🤖 BlueSky Bot Status Monitor"
-echo "=============================="
-
-# Проверяем статус сервиса
-if systemctl is-active --quiet bluesky-bot; then
-    echo "✅ Сервис: ЗАПУЩЕН"
-else
-    echo "❌ Сервис: ОСТАНОВЛЕН"
-fi
-
-# Показываем последние логи
-echo -e "\n📋 Последние 10 строк лога:"
-echo "-----------------------------"
-tail -n 10 bot.log 2>/dev/null || echo "Логи не найдены"
-
-# Показываем использование ресурсов
-echo -e "\n💾 Использование ресурсов:"
-echo "---------------------------"
-ps aux | grep -E "(python.*bluesky_bot|PID)" | grep -v grep
-
-# Показываем размер лога
-if [ -f "bot.log" ]; then
-    LOG_SIZE=$(du -h bot.log | cut -f1)
-    echo -e "\n📄 Размер лога: $LOG_SIZE"
-fi
-EOF
-    
-    chmod +x monitor.sh
-    
-    # Скрипт обновления
-    cat > update.sh << 'EOF'
-#!/bin/bash
-
-# BlueSky Bot Update Script
-# =========================
-
-echo "🔄 Обновление BlueSky Bot..."
-
-cd "$HOME/BlueSky-Bot"
-
-# Останавливаем бота
-echo "⏹️  Останавливаем бота..."
-sudo systemctl stop bluesky-bot
-
-# Сохраняем конфигурацию
-cp .env .env.backup
-
-# Получаем обновления
-echo "📥 Получение обновлений из Git..."
-git pull origin main
-
-# Обновляем зависимости
-echo "📦 Обновление зависимостей..."
-source venv/bin/activate
-pip install -r requirements.txt --upgrade
-
-# Восстанавливаем конфигурацию
-mv .env.backup .env
-
-# Перезапускаем бота
-echo "🚀 Перезапуск бота..."
-sudo systemctl start bluesky-bot
-
-echo "✅ Обновление завершено!"
-EOF
-    
-    chmod +x update.sh
-    
-    # Скрипт полного управления
-    cat > manage.sh << 'EOF'
-#!/bin/bash
-
-# BlueSky Bot Management Script
-# =============================
-
-case "$1" in
-    start)
-        echo "🚀 Запуск BlueSky Bot..."
-        sudo systemctl start bluesky-bot
-        sudo systemctl status bluesky-bot --no-pager
-        ;;
-    stop)
-        echo "⏹️  Остановка BlueSky Bot..."
-        sudo systemctl stop bluesky-bot
-        ;;
-    restart)
-        echo "🔄 Перезапуск BlueSky Bot..."
-        sudo systemctl restart bluesky-bot
-        sudo systemctl status bluesky-bot --no-pager
-        ;;
-    status)
-        sudo systemctl status bluesky-bot --no-pager
-        ;;
-    logs)
-        echo "📋 Последние логи BlueSky Bot:"
-        journalctl -u bluesky-bot -f
-        ;;
-    config)
-        echo "⚙️  Редактирование конфигурации..."
-        nano .env
-        ;;
-    monitor)
-        ./monitor.sh
-        ;;
-    update)
-        ./update.sh
-        ;;
-    *)
-        echo "BlueSky Bot Management"
-        echo "====================="
-        echo "Использование: $0 {start|stop|restart|status|logs|config|monitor|update}"
-        echo ""
-        echo "Команды:"
-        echo "  start   - Запустить бота"
-        echo "  stop    - Остановить бота"
-        echo "  restart - Перезапустить бота"
-        echo "  status  - Статус сервиса"
-        echo "  logs    - Просмотр логов в реальном времени"
-        echo "  config  - Редактировать конфигурацию"
-        echo "  monitor - Мониторинг состояния"
-        echo "  update  - Обновить бота из Git"
-        ;;
-esac
-EOF
-    
-    chmod +x manage.sh
-    
-    print_success "Утилиты управления созданы"
-}
-
-# Финальная настройка
+# Заключительная настройка
 final_setup() {
-    print_header "Финальная настройка"
+    print_step "Финальная настройка..."
     
-    cd "$HOME/BlueSky-Bot"
+    # Устанавливаем правильные права доступа
+    chown -R "$USER:$USER" "$INSTALL_DIR"
+    chmod -R 755 "$INSTALL_DIR"
     
-    # Делаем бота доступным глобально
-    echo "export PATH=\"\$PATH:$HOME/BlueSky-Bot\"" >> ~/.bashrc
+    # Создаем папку для логов если не существует
+    mkdir -p "$INSTALL_DIR/logs"
     
-    # Создаем алиасы для удобства
-    cat >> ~/.bashrc << EOF
-
-# BlueSky Bot Aliases
-alias bot-start='cd $HOME/BlueSky-Bot && ./manage.sh start'
-alias bot-stop='cd $HOME/BlueSky-Bot && ./manage.sh stop'
-alias bot-restart='cd $HOME/BlueSky-Bot && ./manage.sh restart'
-alias bot-status='cd $HOME/BlueSky-Bot && ./manage.sh status'
-alias bot-logs='cd $HOME/BlueSky-Bot && ./manage.sh logs'
-alias bot-config='cd $HOME/BlueSky-Bot && ./manage.sh config'
-alias bot-monitor='cd $HOME/BlueSky-Bot && ./manage.sh monitor'
-alias bot-update='cd $HOME/BlueSky-Bot && ./manage.sh update'
-EOF
-    
-    print_success "Глобальные команды настроены"
+    print_success "Права доступа настроены"
 }
 
-# Показ инструкций
-show_instructions() {
-    print_header "🎉 Установка завершена!"
-    
-    echo -e "${GREEN}"
-    cat << 'EOF'
-╔═══════════════════════════════════════════════════════════════╗
-║                    BlueSky Bot установлен!                   ║
-╚═══════════════════════════════════════════════════════════════╝
-EOF
-    echo -e "${NC}"
-    
-    print_info "СЛЕДУЮЩИЕ ШАГИ:"
+# Вывод инструкций
+print_instructions() {
+    print_step "🎉 Установка завершена!"
     echo ""
-    echo "1️⃣  Настройте конфигурацию:"
-    echo "   cd ~/BlueSky-Bot && nano .env"
+    echo -e "${GREEN}BlueSky Bot успешно установлен!${NC}"
     echo ""
-    echo "2️⃣  Введите ваши данные BlueSky:"
-    echo "   BLUESKY_HANDLE=ваш-бот.bsky.social"
-    echo "   BLUESKY_PASSWORD=ваш-пароль-приложения"
+    echo -e "${YELLOW}Следующие шаги:${NC}"
+    echo "1. Отредактируйте конфигурацию:"
+    echo -e "   ${CYAN}bot-config${NC} или ${CYAN}nano $INSTALL_DIR/.env${NC}"
     echo ""
-    echo "3️⃣  Запустите бота:"
-    echo "   bot-start"
+    echo "2. Укажите ваши учетные данные BlueSky:"
+    echo "   - BLUESKY_HANDLE=ваш.handle.bsky.social"
+    echo "   - BLUESKY_PASSWORD=ваш-пароль-приложения"
     echo ""
-    
-    print_info "ПОЛЕЗНЫЕ КОМАНДЫ:"
+    echo "3. Запустите бота:"
+    echo -e "   ${CYAN}bot-start${NC}"
     echo ""
-    echo "🚀 bot-start     - Запустить бота"
-    echo "⏹️  bot-stop      - Остановить бота"
-    echo "🔄 bot-restart   - Перезапустить бота"
-    echo "📊 bot-status    - Статус бота"
-    echo "📋 bot-logs      - Просмотр логов"
-    echo "⚙️  bot-config    - Редактировать настройки"
-    echo "📱 bot-monitor   - Мониторинг состояния"
-    echo "🔄 bot-update    - Обновить бота"
+    echo -e "${YELLOW}Доступные команды:${NC}"
+    echo -e "   ${CYAN}bot-start${NC}    - Запуск бота"
+    echo -e "   ${CYAN}bot-stop${NC}     - Остановка бота"
+    echo -e "   ${CYAN}bot-restart${NC}  - Перезапуск бота"
+    echo -e "   ${CYAN}bot-status${NC}   - Статус бота"
+    echo -e "   ${CYAN}bot-logs${NC}     - Просмотр логов"
+    echo -e "   ${CYAN}bot-config${NC}   - Редактирование конфигурации"
+    echo -e "   ${CYAN}bot-monitor${NC}  - Мониторинг бота"
+    echo -e "   ${CYAN}bot-update${NC}   - Обновление бота"
     echo ""
-    
-    print_info "РАСПОЛОЖЕНИЕ ФАЙЛОВ:"
-    echo ""
-    echo "📁 Бот:           ~/BlueSky-Bot/"
-    echo "⚙️  Конфигурация:  ~/BlueSky-Bot/.env"
-    echo "📄 Логи:          ~/BlueSky-Bot/bot.log"
-    echo "🔧 Управление:    ~/BlueSky-Bot/manage.sh"
-    echo ""
-    
-    print_warning "ВАЖНО: Не забудьте перезагрузить терминал или выполните:"
-    echo "source ~/.bashrc"
-    echo ""
-    
-    print_success "Установка завершена! Удачного использования! 🤖"
+    echo -e "${GREEN}Удачного использования BlueSky Bot! 🤖${NC}"
 }
 
-# =================================================================
-# ОСНОВНОЙ ПРОЦЕСС УСТАНОВКИ
-# =================================================================
-
+# Основная функция установки
 main() {
-    clear
+    print_header
     
-    echo -e "${BLUE}"
-    cat << 'EOF'
-╔═══════════════════════════════════════════════════════════════╗
-║                BlueSky Bot Auto-Installer                    ║
-║              для Ubuntu Server 24.04.2                      ║
-╚═══════════════════════════════════════════════════════════════╝
-EOF
-    echo -e "${NC}"
-    
-    print_info "Начинаем автоматическую установку..."
-    sleep 2
-    
-    check_user
-    check_os
-    install_system_deps
+    check_requirements
+    install_system_dependencies
+    install_python
     clone_repository
-    setup_python_env
-    setup_configuration
+    setup_python_environment
+    create_config
     create_systemd_service
-    setup_logging
     create_management_scripts
+    create_global_commands
+    setup_log_rotation
     final_setup
-    show_instructions
+    print_instructions
+    
+    echo ""
+    print_success "Установка завершена успешно!"
 }
 
-# Запуск основной функции
+# Проверяем аргументы командной строки
+if [[ "$1" == "--help" || "$1" == "-h" ]]; then
+    echo "BlueSky Bot - Автоматическая установка"
+    echo "Использование: $0 [опции]"
+    echo ""
+    echo "Опции:"
+    echo "  -h, --help     Показать эту справку"
+    echo "  --no-service   Не создавать systemd службу"
+    echo ""
+    echo "Этот скрипт автоматически устанавливает BlueSky Bot на Ubuntu Server."
+    exit 0
+fi
+
+# Запускаем основную функцию
 main "$@" 

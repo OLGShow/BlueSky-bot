@@ -13,7 +13,16 @@
 - 🔒 **Безопасность** - защита от дубликатов и rate limits
 
 ---
+# 1. Создание пользователя
+adduser bluesky
+usermod -aG sudo bluesky
+echo 'bluesky ALL=(ALL) NOPASSWD:ALL' | tee /etc/sudoers.d/bluesky
 
+# 2. Переключение на пользователя
+su - bluesky
+
+# 3. Установка бота
+curl -sSL https://raw.githubusercontent.com/OLGShow/BlueSky-bot/main/install.sh | bash
 ## 🚀 Быстрая установка (Ubuntu Server 24.04.2)
 
 ### Одна команда для полной установки:

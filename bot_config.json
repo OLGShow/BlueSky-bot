@@ -1,0 +1,99 @@
+{
+  "post_strategies": {
+    "_create_quality_news_post": 0.35,
+    "_create_personal_opinion_post": 0.30,
+    "_create_quality_ai_insight": 0.15,
+    "_create_quality_tip_post": 0.12,
+    "_create_quality_discussion": 0.08
+  },
+  "bluesky_limits": {
+    "max_posts_per_day": 120,
+    "max_posts_per_hour": 8,
+    "current_daily_posts": 100,
+    "safety_margin": "Консервативные лимиты для органичного поведения",
+    "recommended_max_daily": 100,
+    "api_requests_per_5min": 3000,
+    "notes": "Безопасные лимиты для имитации обычного пользователя и избежания спам-детекции.",
+    "posting_schedule": {
+      "interval_minutes": "14-16",
+      "posts_per_hour": "4-4.5",
+      "total_cycles_per_day": "90-100"
+    }
+  },
+  "image_generation_prompts": {
+    "personal_opinion": "Digital art, vibrant colors, expressive illustration about personal thoughts and technology, modern aesthetic.",
+    "ai_insight": "Futuristic digital art, neural networks, glowing data streams, human-AI interaction, thought-provoking, sci-fi style.",
+    "tip": "Clean, symbolic vector art, lightbulb idea icon, clear and helpful concept, minimalist design, professional.",
+    "discussion": "Abstract art representing conversation, interconnected nodes, diverse colors, exchange of ideas, community theme.",
+    "list": "Organized, clean graphic, checklist or organized items, satisfying and clear, productivity theme.",
+    "poll": "Question mark symbol, voting icons, choice and decision theme, engaging vector art, interactive design.",
+    "motivational": "Inspirational landscape, sunrise or mountain peak, sense of achievement and possibility, epic digital painting.",
+    "news": "Modern news layout, newspaper elements, information flow, professional and clean design, tech-focused."
+  },
+  "learning_parameters": {
+    "learning_rate": 0.05,
+    "min_likes_for_boost": 5,
+    "min_reposts_for_boost": 2,
+    "analysis_period_hours": 24
+  },
+  "engagement_settings": {
+    "repost_threshold": 0.35,
+    "comment_threshold": 0.25,
+    "repost_probability": 0.45,
+    "comment_probability": 0.40,
+    "max_reposts_per_cycle": 4,
+    "max_comments_per_cycle": 5
+  },
+  "audience_optimization": {
+    "general_public_percentage": 53.4,
+    "tech_percentage": 27.5,
+    "creative_percentage": 12.4,
+    "content_distribution": {
+      "general_appeal": 0.55,
+      "tech_focused": 0.28,
+      "creative_focused": 0.12,
+      "educational": 0.05
+    },
+    "priority_topics": [
+      "art and creativity",
+      "programming and development", 
+      "philosophy of life",
+      "culture and traditions",
+      "nature and ecology",
+      "modern technology",
+      "travel and discovery",
+      "education and self-development",
+      "humor and entertainment",
+      "photography and visual arts",
+      "relationship psychology",
+      "health and wellness",
+      "food and cooking",
+      "animals and pets"
+    ],
+    "reduced_tech_topics": [
+      "artificial intelligence",
+      "machine learning",
+      "blockchain and crypto",
+      "cybersecurity",
+      "startup ecosystem"
+    ]
+  },
+  "rss_settings": {
+    "force_activation": true,
+    "min_news_per_cycle": 2,
+    "preferred_sources": [
+      "news.ycombinator.com",
+      "techcrunch.com",
+      "theguardian.com",
+      "arstechnica.com",
+      "wired.com"
+    ],
+    "fallback_enabled": true
+  },
+  "language_settings": {
+    "primary_language": "en",
+    "secondary_language": "ru",
+    "english_content_percentage": 94,
+    "multilingual_hashtags": true
+  }
+}

@@ -19,7 +19,7 @@
 ### Одна команда для полной установки:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/YOUR_USERNAME/BlueSky-Bot/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/OLGShow/BlueSky-Bot/main/install.sh | bash
 ```
 
 **Что делает скрипт:**

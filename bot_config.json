@@ -1,10 +1,11 @@
 {
   "post_strategies": {
-    "_create_quality_news_post": 0.35,
-    "_create_personal_opinion_post": 0.30,
-    "_create_quality_ai_insight": 0.15,
-    "_create_quality_tip_post": 0.12,
-    "_create_quality_discussion": 0.08
+    "_create_viral_hot_take": 0.25,
+    "_create_trending_commentary": 0.20,
+    "_create_personal_insight": 0.20,
+    "_create_quality_news_post": 0.15,
+    "_create_prediction_post": 0.10,
+    "_create_quality_ai_insight": 0.10
   },
   "bluesky_limits": {
     "max_posts_per_day": 120,
@@ -15,85 +16,100 @@
     "api_requests_per_5min": 3000,
     "notes": "Безопасные лимиты для имитации обычного пользователя и избежания спам-детекции.",
     "posting_schedule": {
-      "interval_minutes": "14-16",
-      "posts_per_hour": "4-4.5",
-      "total_cycles_per_day": "90-100"
+      "peak_hours_utc": [7, 13, 18, 22],
+      "interval_minutes": "240-360",
+      "posts_per_day": "8-12",
+      "focus_on_peak_times": true
     }
   },
-  "image_generation_prompts": {
-    "personal_opinion": "Digital art, vibrant colors, expressive illustration about personal thoughts and technology, modern aesthetic.",
-    "ai_insight": "Futuristic digital art, neural networks, glowing data streams, human-AI interaction, thought-provoking, sci-fi style.",
-    "tip": "Clean, symbolic vector art, lightbulb idea icon, clear and helpful concept, minimalist design, professional.",
-    "discussion": "Abstract art representing conversation, interconnected nodes, diverse colors, exchange of ideas, community theme.",
-    "list": "Organized, clean graphic, checklist or organized items, satisfying and clear, productivity theme.",
-    "poll": "Question mark symbol, voting icons, choice and decision theme, engaging vector art, interactive design.",
-    "motivational": "Inspirational landscape, sunrise or mountain peak, sense of achievement and possibility, epic digital painting.",
-    "news": "Modern news layout, newspaper elements, information flow, professional and clean design, tech-focused."
+  "viral_content_settings": {
+    "min_viral_score": 0.4,
+    "required_engagement_triggers": 2,
+    "optimal_post_length": [150, 250],
+    "question_percentage": 0.7,
+    "trending_topic_bonus": 0.3,
+    "emotional_language_requirement": true
   },
-  "learning_parameters": {
-    "learning_rate": 0.05,
-    "min_likes_for_boost": 5,
-    "min_reposts_for_boost": 2,
-    "analysis_period_hours": 24
-  },
-  "engagement_settings": {
-    "repost_threshold": 0.35,
-    "comment_threshold": 0.25,
-    "repost_probability": 0.45,
-    "comment_probability": 0.40,
-    "max_reposts_per_cycle": 4,
-    "max_comments_per_cycle": 5
-  },
-  "audience_optimization": {
-    "general_public_percentage": 53.4,
-    "tech_percentage": 27.5,
-    "creative_percentage": 12.4,
-    "content_distribution": {
-      "general_appeal": 0.55,
-      "tech_focused": 0.28,
-      "creative_focused": 0.12,
-      "educational": 0.05
-    },
-    "priority_topics": [
-      "art and creativity",
-      "programming and development", 
-      "philosophy of life",
-      "culture and traditions",
-      "nature and ecology",
-      "modern technology",
-      "travel and discovery",
-      "education and self-development",
-      "humor and entertainment",
-      "photography and visual arts",
-      "relationship psychology",
-      "health and wellness",
-      "food and cooking",
-      "animals and pets"
-    ],
-    "reduced_tech_topics": [
-      "artificial intelligence",
-      "machine learning",
-      "blockchain and crypto",
-      "cybersecurity",
-      "startup ecosystem"
+  "content_diversity": {
+    "max_similar_posts_per_day": 2,
+    "topic_rotation_hours": 6,
+    "style_variations": [
+      "controversial_take", 
+      "industry_insight", 
+      "personal_story", 
+      "prediction", 
+      "myth_busting",
+      "current_events_commentary"
     ]
   },
-  "rss_settings": {
-    "force_activation": true,
-    "min_news_per_cycle": 2,
-    "preferred_sources": [
-      "news.ycombinator.com",
-      "techcrunch.com",
-      "theguardian.com",
-      "arstechnica.com",
-      "wired.com"
+  "engagement_optimization": {
+    "repost_threshold": 0.25,
+    "comment_threshold": 0.20,
+    "repost_probability": 0.60,
+    "comment_probability": 0.45,
+    "max_reposts_per_cycle": 6,
+    "max_comments_per_cycle": 4,
+    "focus_on_viral_content": true
+  },
+  "timing_strategy": {
+    "peak_hours_utc": [7, 13, 18, 22],
+    "content_by_time": {
+      "morning": "industry_news_commentary",
+      "lunch": "hot_takes_and_polls", 
+      "evening": "personal_insights",
+      "night": "controversial_discussions"
+    },
+    "avoid_consecutive_posts_hours": 4,
+    "weekend_strategy": "personal_content_focus"
+  },
+  "ai_prompt_improvements": {
+    "viral_triggers": [
+      "Add controversial but thoughtful opinion",
+      "Include surprising statistics or facts", 
+      "Reference current events or trends",
+      "Share personal experience or insider knowledge",
+      "Ask provocative questions",
+      "Challenge common assumptions",
+      "Make bold predictions"
     ],
-    "fallback_enabled": true
+    "engagement_boosters": [
+      "End with question to encourage responses",
+      "Use emotional language strategically", 
+      "Include call-to-action for sharing",
+      "Reference popular culture or memes",
+      "Create sense of urgency or FOMO"
+    ]
+  },
+  "repost_tracking": {
+    "track_repost_performance": true,
+    "analyze_viral_reposts": true,
+    "learn_from_successful_reposts": true,
+    "repost_success_metrics": [
+      "original_engagement_rate",
+      "repost_timing",
+      "audience_overlap", 
+      "content_type_effectiveness"
+    ]
+  },
+  "audience_growth_metrics": {
+    "target_daily_followers": 5,
+    "engagement_rate_target": 0.03,
+    "viral_post_target_per_week": 2,
+    "cross_platform_mentions": true,
+    "influencer_interaction_priority": true
+  },
+  "image_generation_prompts": {
+    "viral_hot_take": "Bold, attention-grabbing visual with contrasting colors, dramatic lighting, thought-provoking symbolism",
+    "trending_commentary": "Modern news-style graphic with dynamic elements, breaking news aesthetic, urgent visual cues",
+    "personal_insight": "Intimate, personal aesthetic with warm colors, relatable symbolism, authentic feeling",
+    "prediction": "Futuristic, crystal ball aesthetic with glowing elements, time-related imagery, mysterious atmosphere",
+    "controversial": "Balanced debate imagery, scales of justice, question marks, thoughtful discussion symbols"
   },
   "language_settings": {
     "primary_language": "en",
-    "secondary_language": "ru",
-    "english_content_percentage": 94,
-    "multilingual_hashtags": true
+    "secondary_language": "ru", 
+    "english_content_percentage": 95,
+    "localized_trending_topics": true,
+    "cultural_context_awareness": true
   }
 }

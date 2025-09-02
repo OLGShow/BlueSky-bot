@@ -35,6 +35,9 @@ from bluesky_rich_posts import BlueskyRichPostCreator, PostFactory, ImageData, L
 # Добавляем импорт нашего адаптера
 from pollinations_adapter import PollinationsAI
 
+# Импорт улучшений AI
+from ai_improvements import ContentQualityAnalyzer, EngagementOptimizer
+
 # Настройка логирования с абсолютным путем
 import sys
 
@@ -124,6 +127,10 @@ class BotMemory:
     # Новое поле для предотвращения дубликатов
     published_content_hashes: Set[str] = field(default_factory=set)
     published_urls: Set[str] = field(default_factory=set)
+    # НОВОЕ: Tracking репостов и вирусности
+    repost_performance: List[Dict] = field(default_factory=list)
+    viral_posts: List[Dict] = field(default_factory=list)
+    engagement_metrics: Dict[str, float] = field(default_factory=dict)
     
     def save(self, filename: str = 'bot_memory.pkl'):
         """Сохранение памяти в файл"""
@@ -146,6 +153,19 @@ class BotMemory:
                 if not hasattr(memory, 'published_urls'):
                     memory.published_urls = set()
                     logger.info("🔧 Добавлено поле published_urls для совместимости")
+                
+                # НОВОЕ: Добавляем поля для tracking вирусности
+                if not hasattr(memory, 'repost_performance'):
+                    memory.repost_performance = []
+                    logger.info("🔧 Добавлено поле repost_performance для tracking репостов")
+                
+                if not hasattr(memory, 'viral_posts'):
+                    memory.viral_posts = []
+                    logger.info("🔧 Добавлено поле viral_posts для tracking вирусных постов")
+                
+                if not hasattr(memory, 'engagement_metrics'):
+                    memory.engagement_metrics = {}
+                    logger.info("🔧 Добавлено поле engagement_metrics для метрик вовлеченности")
                     
                 return memory
             except Exception as e:
@@ -161,7 +181,11 @@ class BotMemory:
             content_performance={},
             last_update=datetime.now(),
             published_content_hashes=set(),
-            published_urls=set()
+            published_urls=set(),
+            # НОВОЕ: Инициализация полей tracking
+            repost_performance=[],
+            viral_posts=[],
+            engagement_metrics={}
         )
 
 class AutonomousBlueskyBotV2:
@@ -326,6 +350,10 @@ class AutonomousBlueskyBotV2:
         self.trending_tracker = BlueSkyTrendingTracker(self.bluesky_client)
         self.dynamic_generator = DynamicContentGenerator(self.trending_tracker)
         
+        # НОВОЕ: Инициализация улучшенных AI компонентов
+        self.content_analyzer = ContentQualityAnalyzer()
+        self.engagement_optimizer = EngagementOptimizer()
+        
         # Система мониторинга активности (heartbeat)
         self.last_heartbeat = datetime.now()
         self.heartbeat_file = 'bot_heartbeat.txt'
@@ -350,11 +378,11 @@ class AutonomousBlueskyBotV2:
                 "image_generation_prompts": {},
                 "learning_parameters": {},
                 "engagement_settings": {
-                    "repost_threshold": 0.75,  # ИЗМЕНЕНО: Повышен порог для репостов (было 0.65)
+                    "repost_threshold": 0.9,  # ИЗМЕНЕНО: Очень высокий порог для репостов (было 0.75) - практически отключает репосты
                     "comment_threshold": 0.65,  # ИЗМЕНЕНО: Повышен порог для комментов (было 0.5)
-                    "repost_probability": 0.15,  # ИЗМЕНЕНО: Снижена вероятность репоста (было 0.4)
+                    "repost_probability": 0.02,  # ИЗМЕНЕНО: Минимальная вероятность репоста (было 0.15) - 2%
                     "comment_probability": 0.2,  # ИЗМЕНЕНО: Снижена вероятность комментария (было 0.35)
-                    "max_reposts_per_cycle": 1,  # ИЗМЕНЕНО: Максимум 1 репост за цикл (было 3)
+                    "max_reposts_per_cycle": 0,  # ИЗМЕНЕНО: ПОЛНОСТЬЮ ОТКЛЮЧЕНЫ репосты за цикл (было 1)
                     "max_comments_per_cycle": 2  # ИЗМЕНЕНО: Максимум 2 комментария за цикл (было 4)
                 }
             }
@@ -782,9 +810,9 @@ class AutonomousBlueskyBotV2:
                 self.daily_post_count += 1
                 logger.info(f"✅ Опубликован качественный пост #{self.daily_post_count}: {post.text[:80].replace(chr(10), ' ')}...")
                 
-                # Сохраняем для анализа с хешем
+                # УЛУЧШЕННОЕ сохранение для анализа с вирусными метриками
                 content_hash = self._generate_content_hash(post.text, url, image_url)
-                self.memory.successful_posts.append({
+                post_data = {
                     'text': post.text,
                     'uri': created.uri,
                     'created_at': datetime.now(),
@@ -793,8 +821,27 @@ class AutonomousBlueskyBotV2:
                     'quality_score': getattr(post, 'quality_score', 0.8),
                     'content_hash': content_hash,
                     'url': url,
-                    'image_url': image_url
-                })
+                    'image_url': image_url,
+                    # НОВОЕ: Вирусные метрики
+                    'viral_score': getattr(post, 'viral_score', 0.0),
+                    'viral_factors': getattr(post, 'viral_factors', []),
+                    'predicted_engagement': 0,  # Будет обновлено позже
+                    'actual_engagement': 0      # Будет обновлено при анализе
+                }
+                
+                self.memory.successful_posts.append(post_data)
+                
+                # НОВОЕ: Отслеживаем потенциально вирусные посты
+                if getattr(post, 'viral_score', 0.0) >= 0.6:
+                    self.memory.viral_posts.append({
+                        'uri': created.uri,
+                        'text': post.text[:100],
+                        'viral_score': getattr(post, 'viral_score', 0.0),
+                        'factors': getattr(post, 'viral_factors', []),
+                        'timestamp': datetime.now().isoformat(),
+                        'content_type': getattr(post, 'content_type', 'general')
+                    })
+                    logger.info(f"🔥 Пост добавлен в список потенциально вирусных (score: {getattr(post, 'viral_score', 0.0):.2f})")
                 
                 # Планируем отложенный анализ производительности
                 asyncio.create_task(self.delayed_performance_check(created.uri, 3600))
@@ -812,47 +859,86 @@ class AutonomousBlueskyBotV2:
         return random.choices(functions, weights=weights)[0]
     
     def _evaluate_post_quality(self, post: RichTextPost) -> bool:
-        """Оценка качества поста перед публикацией"""
+        """УЛУЧШЕННАЯ оценка качества поста с анализом вирусного потенциала"""
         if not post or not post.text:
             return False
         
-        score = 0.0
+        # НОВОЕ: Используем улучшенный анализатор качества
+        analysis = self.content_analyzer.analyze_post_potential(post.text)
+        viral_score = analysis['viral_score']
+        factors = analysis['factors']
+        recommendations = analysis['recommendations']
         
-        # Длина поста (оптимальная 80-280 символов)
+        # Получаем настройки вирусного контента из конфигурации
+        viral_settings = self.config.get('viral_content_settings', {})
+        min_viral_score = viral_settings.get('min_viral_score', 0.4)
+        required_triggers = viral_settings.get('required_engagement_triggers', 2)
+        
+        # Базовая оценка (старая система)
+        basic_score = 0.0
         text_length = len(post.text)
-        if 80 <= text_length <= 280:
-            score += 0.3
-        elif text_length < 80:
-            score += 0.1  # Слишком короткий
+        
+        # Длина поста (оптимальная 150-280 символов для вирусности)
+        if 150 <= text_length <= 280:
+            basic_score += 0.3
+        elif 80 <= text_length <= 150:
+            basic_score += 0.2
         else:
-            score += 0.2  # Слишком длинный
+            basic_score += 0.1
         
         # Наличие эмодзи
         emoji_count = len(re.findall(r'[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF\U0001F1E0-\U0001F1FF\U00002700-\U000027BF]', post.text))
         if emoji_count > 0:
-            score += 0.2
+            basic_score += 0.2
         
-        # Наличие хештегов (если требуется)
+        # Наличие хештегов
         hashtag_count = post.text.count('#')
         if hashtag_count > 0:
-            score += 0.2
+            basic_score += 0.2
         elif self.require_hashtags:
             logger.warning("⚠️ Пост не содержит обязательных хештегов")
             return False
         
-        # Структурированность (списки, вопросы)
-        if any(marker in post.text for marker in ['1.', '2.', '•', '◦', '▪', '?']):
-            score += 0.2
+        # Вопросы (критично для engagement)
+        if '?' in post.text:
+            basic_score += 0.3  # Увеличен вес для вопросов
         
-        # Вовлекающий контент
-        engaging_words = ['как', 'что', 'почему', 'какой', 'где', 'когда', 'думаете', 'мнение', 'считаете']
-        if any(word in post.text.lower() for word in engaging_words):
-            score += 0.1
+        # Объединенная оценка: 60% вирусный потенциал + 40% базовая оценка
+        combined_score = (viral_score * 0.6) + (basic_score * 0.4)
         
-        post.quality_score = score
-        logger.info(f"📊 Оценка качества поста: {score:.2f}/1.0")
+        post.quality_score = combined_score
+        post.viral_score = viral_score
+        post.viral_factors = factors
         
-        return score >= self.min_post_quality_score
+        # Детальное логирование
+        logger.info(f"📊 АНАЛИЗ КАЧЕСТВА ПОСТА:")
+        logger.info(f"   🎯 Вирусный потенциал: {viral_score:.2f}/1.0")
+        logger.info(f"   📈 Базовая оценка: {basic_score:.2f}/1.0")
+        logger.info(f"   🔥 Итоговая оценка: {combined_score:.2f}/1.0")
+        logger.info(f"   ✅ Факторы вирусности: {', '.join(factors) if factors else 'Нет'}")
+        
+        if recommendations:
+            logger.info(f"   💡 Рекомендации:")
+            for rec in recommendations[:3]:  # Показываем только первые 3
+                logger.info(f"     • {rec}")
+        
+        # Проверяем соответствие требованиям
+        meets_viral_threshold = viral_score >= min_viral_score
+        meets_basic_threshold = combined_score >= self.min_post_quality_score
+        has_enough_triggers = len(factors) >= required_triggers
+        
+        logger.info(f"   🎪 Проверки:")
+        logger.info(f"     Вирусный порог ({min_viral_score}): {'✅' if meets_viral_threshold else '❌'}")
+        logger.info(f"     Базовый порог ({self.min_post_quality_score}): {'✅' if meets_basic_threshold else '❌'}")
+        logger.info(f"     Триггеры engagement ({required_triggers}): {'✅' if has_enough_triggers else '❌'}")
+        
+        # Пост проходит если соответствует всем критериям
+        passed = meets_viral_threshold and meets_basic_threshold and has_enough_triggers
+        
+        if not passed:
+            logger.warning(f"⚠️ Пост не прошел проверку качества (viral: {viral_score:.2f}, combined: {combined_score:.2f}, triggers: {len(factors)})")
+        
+        return passed
     
     async def _create_quality_news_post(self) -> Optional[RichTextPost]:
         """Создает качественный новостной пост с изображением"""
@@ -1222,6 +1308,187 @@ class AutonomousBlueskyBotV2:
             logger.error(f"❌ Error in dynamic discussion post: {e}")
             return await self._create_emergency_unique_post()
     
+    # НОВЫЕ МЕТОДЫ ДЛЯ ВИРУСНОГО КОНТЕНТА
+    
+    async def _create_viral_hot_take(self) -> RichTextPost:
+        """Создает вирусное горячее мнение с высоким engagement потенциалом"""
+        hot_take_topics = [
+            "AI replacing developers is overhyped",
+            "Remote work is killing innovation", 
+            "Most startups fail because of ego, not market",
+            "College degrees are becoming irrelevant in tech",
+            "Open source is not sustainable long-term",
+            "Crypto is just gambling with extra steps",
+            "Social media algorithms are destroying creativity",
+            "The metaverse was a $100B mistake"
+        ]
+        
+        selected_topic = random.choice(hot_take_topics)
+        
+        async def content_creator():
+            viral_prompts = self.engagement_optimizer.generate_viral_post_prompts()
+            ai_prompt = f"""
+            Create a controversial but thoughtful hot take about: "{selected_topic}"
+            
+            Requirements:
+            - Be provocative but not offensive
+            - Include surprising statistics or facts
+            - Add personal experience or industry insight
+            - End with a question to encourage debate
+            - Use emotional language strategically
+            - 180-250 characters max
+            - Include 3-4 relevant hashtags
+            
+            Format as JSON: {{"post_text": "...", "hashtags": "..."}}
+            
+            Example style: "Unpopular opinion: {selected_topic}. After 10 years in the industry, I've seen this pattern destroy more companies than market crashes. Here's why... What's your take? 🔥"
+            """
+            return await self.generate_structured_post_content(ai_prompt, model_key='powerful')
+
+        async def fallback_creator():
+            return {
+                "post_text": f"🔥 Hot take: {selected_topic}. Change my mind! What's your experience?",
+                "hashtags": "#hottake #controversial #tech #opinion"
+            }
+
+        return await self._create_post_with_image_generation(
+            content_creator,
+            f"controversial opinion about {selected_topic}",
+            'viral_hot_take',
+            fallback_creator
+        )
+    
+    async def _create_trending_commentary(self) -> RichTextPost:
+        """Создает комментарий к актуальным трендам с уникальным углом"""
+        trending_themes = [
+            "latest AI breakthrough", "tech layoffs", "startup funding news",
+            "new programming language", "security breach", "platform changes",
+            "industry controversy", "major acquisition", "economic changes",
+            "regulatory changes in tech"
+        ]
+        
+        selected_theme = random.choice(trending_themes)
+        
+        async def content_creator():
+            ai_prompt = f"""
+            Create a trending commentary post about: "{selected_theme}"
+            
+            Requirements:
+            - Provide unique insider perspective nobody else is discussing
+            - Connect to broader implications
+            - Include surprising context or background
+            - Make bold prediction about consequences
+            - Ask provocative question
+            - 200-280 characters
+            - Use urgent, newsy language
+            
+            Format as JSON: {{"post_text": "...", "hashtags": "..."}}
+            
+            Style: "Everyone's talking about {selected_theme}, but here's what they're missing... [unique insight] This will change everything. Mark my words. What do you think happens next? 👀"
+            """
+            return await self.generate_structured_post_content(ai_prompt, model_key='powerful')
+
+        async def fallback_creator():
+            return {
+                "post_text": f"📰 Breaking: {selected_theme} is trending. Here's my take on what this really means for the industry... Thoughts?",
+                "hashtags": "#breaking #tech #analysis #trends"
+            }
+
+        return await self._create_post_with_image_generation(
+            content_creator,
+            f"trending news commentary about {selected_theme}",
+            'trending_commentary',
+            fallback_creator
+        )
+    
+    async def _create_personal_insight(self) -> RichTextPost:
+        """Создает пост с личным инсайтом или опытом"""
+        insight_areas = [
+            "biggest career mistake", "counterintuitive business lesson",
+            "overlooked skill for success", "industry secret nobody talks about",
+            "expensive lesson learned", "myth everyone believes",
+            "pattern in successful people", "red flag in startups",
+            "undervalued technology", "overrated trend"
+        ]
+        
+        selected_area = random.choice(insight_areas)
+        
+        async def content_creator():
+            ai_prompt = f"""
+            Create a personal insight post about: "{selected_area}"
+            
+            Requirements:
+            - Share authentic personal experience or observation
+            - Include specific example or story
+            - Provide actionable takeaway
+            - Use vulnerable, honest tone
+            - End with relatable question
+            - 220-280 characters
+            - Feel authentic and human
+            
+            Format as JSON: {{"post_text": "...", "hashtags": "..."}}
+            
+            Style: "After [X years/experience], I learned that {selected_area} is... [personal story/insight]. Wish someone told me this earlier. Anyone else experienced this? 💭"
+            """
+            return await self.generate_structured_post_content(ai_prompt, model_key='creative')
+
+        async def fallback_creator():
+            return {
+                "post_text": f"💭 Personal insight: {selected_area} taught me more about business than any book. Here's what I learned... What's your experience?",
+                "hashtags": "#insight #experience #lessons #personal"
+            }
+
+        return await self._create_post_with_image_generation(
+            content_creator,
+            f"personal insight about {selected_area}",
+            'personal_insight',
+            fallback_creator
+        )
+    
+    async def _create_prediction_post(self) -> RichTextPost:
+        """Создает пост с смелым прогнозом"""
+        prediction_areas = [
+            "AI development in 2025", "remote work evolution",
+            "crypto market direction", "tech industry consolidation",
+            "programming languages future", "startup ecosystem changes",
+            "social media platform wars", "economic tech impact",
+            "cybersecurity threats", "developer tools evolution"
+        ]
+        
+        selected_area = random.choice(prediction_areas)
+        
+        async def content_creator():
+            ai_prompt = f"""
+            Create a bold prediction post about: "{selected_area}"
+            
+            Requirements:
+            - Make specific, bold prediction
+            - Provide reasoning and evidence
+            - Set timeline (6 months, 1 year, 2 years)
+            - Include potential consequences
+            - Ask for counter-arguments
+            - 250-280 characters
+            - Use confident, analytical tone
+            
+            Format as JSON: {{"post_text": "...", "hashtags": "..."}}
+            
+            Style: "Prediction: By [timeline], {selected_area} will... [specific prediction]. Here's why: [reasoning]. This means [consequences]. Prove me wrong! 🔮"
+            """
+            return await self.generate_structured_post_content(ai_prompt, model_key='powerful')
+
+        async def fallback_creator():
+            return {
+                "post_text": f"🔮 Bold prediction: {selected_area} will surprise everyone in 2025. Here's my reasoning... What do you think?",
+                "hashtags": "#prediction #future #tech #analysis"
+            }
+
+        return await self._create_post_with_image_generation(
+            content_creator,
+            f"future prediction about {selected_area}",
+            'prediction',
+            fallback_creator
+        )
+    
     async def create_manual_thread(self, topic: str) -> None:
         """Создание thread только по специальному запросу (НЕ автоматически)"""
         logger.info(f"📝 РУЧНОЕ создание thread на тему: {topic}")
@@ -1416,52 +1683,52 @@ class AutonomousBlueskyBotV2:
                     self.http_session = aiohttp.ClientSession()
                 
                 async with self.http_session.get(feed_url, timeout=timeout) as response:
-                        if response.status != 200:
-                            logger.warning(f"⚠️ {feed_url}: HTTP {response.status}")
-                            continue
+                    if response.status != 200:
+                        logger.warning(f"⚠️ {feed_url}: HTTP {response.status}")
+                        continue
 
-                        content = await response.text()
-                        feed = feedparser.parse(content)
+                    content = await response.text()
+                    feed = feedparser.parse(content)
+                    
+                    fetch_time = (datetime.now() - start_time).total_seconds()
+                    
+                    # Ограичиваем записи для разнообразия (было 3, стало 4)
+                    entries_to_process = 4
+                    source_entries = []
+                    
+                    for entry in feed.entries[:entries_to_process]:
+                        entry_data = {
+                            'title': self.clean_html(entry.title),
+                            'url': entry.link,
+                            'description': self.clean_html(entry.get('summary', '')[:250]),
+                            'source': self.clean_html(feed.feed.title) if hasattr(feed.feed, 'title') else 'Unknown',
+                            'published': entry.get('published', ''),
+                            'fetch_time': fetch_time,
+                            'source_url': feed_url,
+                            'image_url': None,
+                            'priority_score': 0
+                        }
                         
-                        fetch_time = (datetime.now() - start_time).total_seconds()
+                        # УЛУЧШЕННЫЙ поиск изображений
+                        image_url = self._enhanced_image_extraction(entry)
+                        entry_data['image_url'] = image_url
                         
-                        # Ограичиваем записи для разнообразия (было 3, стало 4)
-                        entries_to_process = 4
-                        source_entries = []
+                        # Расчет приоритета записи
+                        entry_data['priority_score'] = self._calculate_entry_priority(entry_data, feed_url)
                         
-                        for entry in feed.entries[:entries_to_process]:
-                            entry_data = {
-                                'title': self.clean_html(entry.title),
-                                'url': entry.link,
-                                'description': self.clean_html(entry.get('summary', '')[:250]),
-                                'source': self.clean_html(feed.feed.title) if hasattr(feed.feed, 'title') else 'Unknown',
-                                'published': entry.get('published', ''),
-                                'fetch_time': fetch_time,
-                                'source_url': feed_url,
-                                'image_url': None,
-                                'priority_score': 0
-                            }
-                            
-                            # УЛУЧШЕННЫЙ поиск изображений
-                            image_url = self._enhanced_image_extraction(entry)
-                            entry_data['image_url'] = image_url
-                            
-                            # Расчет приоритета записи
-                            entry_data['priority_score'] = self._calculate_entry_priority(entry_data, feed_url)
-                            
-                            # Фильтруем только качественные записи
-                            if len(entry_data['title']) > 20 and entry_data['title'] != 'Unknown':
-                                source_entries.append(entry_data)
+                        # Фильтруем только качественные записи
+                        if len(entry_data['title']) > 20 and entry_data['title'] != 'Unknown':
+                            source_entries.append(entry_data)
+                    
+                    if source_entries:
+                        all_entries.extend(source_entries)
+                        sources_used += 1
                         
-                        if source_entries:
-                            all_entries.extend(source_entries)
-                            sources_used += 1
-                            
-                            source_name = feed.feed.title if hasattr(feed.feed, 'title') else feed_url.split('//')[-1].split('/')[0]
-                            logger.info(f"✅ {source_name}: {len(source_entries)} записей за {fetch_time:.1f}с")
-                        
-                        # Пауза между источниками для вежливости
-                        await asyncio.sleep(0.3)
+                        source_name = feed.feed.title if hasattr(feed.feed, 'title') else feed_url.split('//')[-1].split('/')[0]
+                        logger.info(f"✅ {source_name}: {len(source_entries)} записей за {fetch_time:.1f}с")
+                    
+                    # Пауза между источниками для вежливости
+                    await asyncio.sleep(0.3)
                         
             except asyncio.TimeoutError:
                 source_name = feed_url.split('//')[-1].split('/')[0]
@@ -1680,14 +1947,16 @@ class AutonomousBlueskyBotV2:
             
             # Получаем настройки взаимодействия
             engagement_settings = self.config.get('engagement_settings', {})
-            repost_threshold = engagement_settings.get('repost_threshold', 0.75)  # ИЗМЕНЕНО: Повышен порог для репостов (было 0.65)
+            repost_threshold = engagement_settings.get('repost_threshold', 0.9)  # ИЗМЕНЕНО: Очень высокий порог (было 0.75) - практически отключает репосты
             comment_threshold = engagement_settings.get('comment_threshold', 0.65)  # ИЗМЕНЕНО: Повышен порог для комментов (было 0.5)
-            repost_probability = engagement_settings.get('repost_probability', 0.15)  # ИЗМЕНЕНО: Снижена вероятность репоста (было 0.4)
+            repost_probability = engagement_settings.get('repost_probability', 0.02)  # ИЗМЕНЕНО: Минимальная вероятность (было 0.15) - 2%
             comment_probability = engagement_settings.get('comment_probability', 0.2)  # ИЗМЕНЕНО: Снижена вероятность комментария (было 0.35)
-            max_reposts = engagement_settings.get('max_reposts_per_cycle', 1)  # ИЗМЕНЕНО: Максимум 1 репост за цикл (было 3)
+            max_reposts = engagement_settings.get('max_reposts_per_cycle', 0)  # ИЗМЕНЕНО: ПОЛНОСТЬЮ ОТКЛЮЧЕНЫ репосты (было 1)
             max_comments = engagement_settings.get('max_comments_per_cycle', 2)  # ИЗМЕНЕНО: Максимум 2 комментария за цикл (было 4)
             
             logger.info(f"📰 Получено {len(timeline.feed)} постов для анализа")
+            if max_reposts == 0:
+                logger.info(f"🚫 Репосты ПОЛНОСТЬЮ ОТКЛЮЧЕНЫ (max_reposts=0)")
             if BLUESKY_COMPLIANT_MODE and NO_AUTO_COMMENTS:
                 logger.info(f"🎯 Пороги: репост≥{repost_threshold} (комментарии отключены)")
             else:
@@ -2082,7 +2351,7 @@ class AutonomousBlueskyBotV2:
                 self.memory.reposted_posts_cache = self.reposted_posts
             if hasattr(self, 'followed_users'):
                 self.memory.followed_users_cache = self.followed_users
-            
+        
             # Сохраняем память
             self.memory.last_update = datetime.now()
             self.memory.save()

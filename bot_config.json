@@ -1,15 +1,15 @@
 {
   "post_strategies": {
-    "_create_viral_hot_take": 0.25,
-    "_create_trending_commentary": 0.20,
-    "_create_personal_insight": 0.20,
-    "_create_quality_news_post": 0.15,
-    "_create_prediction_post": 0.10,
-    "_create_quality_ai_insight": 0.10
+    "_create_quality_news_post": 0.30,
+    "_create_quality_ai_insight": 0.20,
+    "_create_trending_commentary": 0.15,
+    "_create_personal_insight": 0.15,
+    "_create_viral_hot_take": 0.10,
+    "_create_prediction_post": 0.10
   },
   "bluesky_limits": {
     "max_posts_per_day": 10,
-    "max_interactions_per_cycle": 10,
+    "max_interactions_per_cycle": 6,
     "post_interval_minutes": [60, 90],
     "posting_schedule": {
       "peak_hours_utc": [7, 13, 18, 22],
@@ -37,18 +37,18 @@
     ]
   },
   "engagement_settings": {
-    "repost_threshold": 0.40,
+    "repost_threshold": 0.45,
     "repost_threshold_mode": "dynamic_quantile",
-    "repost_quantile": 0.85,
-    "repost_min_threshold": 0.35,
+    "repost_quantile": 0.90,
+    "repost_min_threshold": 0.40,
     "repost_fallback_min_posts": 30,
     "comment_threshold": 0.65,
-    "repost_probability": 0.30,
+    "repost_probability": 0.18,
     "comment_probability": 0,
-    "max_reposts_per_cycle": 2,
+    "max_reposts_per_cycle": 1,
     "max_comments_per_cycle": 0,
     "timeline_page_limit": 100,
-    "timeline_pages": 3,
+    "timeline_pages": 2,
     "repost_policy_filter": {
       "max_conflict_words": 2,
       "author_cooldown_posts": 3,
@@ -86,22 +86,23 @@
         "weight": 0.06
       }
     },
-    "topical_max": 0.45,
+    "topical_max": 0.55,
     "keyword_per_match": 0.05,
     "hashtag_bonus": 0.08,
     "question_bonus": 0.07,
     "optimal_length_range": [80, 300],
     "length_bonus": 0.05,
     "engagement_log_base": 10,
-    "engagement_max": 0.25,
-    "like_threshold": 0.20
+    "engagement_max": 0.18,
+    "like_threshold": 0.32
   },
   "quality_gate_settings": {
+    "min_combined_score": 0.62,
     "min_signal_density": 0.3,
     "max_fluff_score": 0.4,
     "max_semantic_similarity": 0.45,
     "recent_posts_window": 15,
-    "max_regenerations": 2
+    "max_regenerations": 3
   },
   "timing_strategy": {
     "peak_hours_utc": [7, 13, 18, 22],

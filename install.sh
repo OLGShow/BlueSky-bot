@@ -69,6 +69,14 @@ ok "Installing package"
 sudo apt update
 sudo apt install -y bluesky-bot
 
+# Fix log file permissions for legacy package versions.
+sudo mkdir -p /var/lib/bluesky-bot
+for f in bot.log audit.log; do
+  sudo touch "/var/lib/bluesky-bot/${f}"
+  sudo chown bluesky-bot:bluesky-bot "/var/lib/bluesky-bot/${f}" 2>/dev/null || true
+  sudo ln -sfn "/var/lib/bluesky-bot/${f}" "/opt/bluesky-bot/${f}" 2>/dev/null || true
+done
+
 if sudo test -f "${ENV_FILE}"; then
   if sudo grep -Eq "your-bot\.bsky\.social|your-app-password" "${ENV_FILE}"; then
     if can_prompt_tty; then

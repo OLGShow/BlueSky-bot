@@ -50,8 +50,8 @@ python3 -m venv "$VENV_DIR"
 ln -sf "${CONF_DIR}/.env" "${BOT_DIR}/.env"
 ln -sf "${CONF_DIR}/bot_config.json" "${BOT_DIR}/bot_config.json"
 
-# Symlink state files into data dir
-for f in bot_memory.json action_ledger.jsonl session.json bot.lock bot_heartbeat.txt; do
+# Symlink state and log files into data dir
+for f in bot_memory.json action_ledger.jsonl session.json bot.lock bot_heartbeat.txt bot.log audit.log; do
     target="${DATA_DIR}/${f}"
     link="${BOT_DIR}/${f}"
     [ -f "$target" ] || touch "$target"

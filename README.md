@@ -91,6 +91,8 @@ sudo apt install bluesky-bot
 sudo nano /etc/bluesky-bot/.env
 ```
 
+При интерактивной установке пакет сам запросит `BLUESKY_HANDLE` и `BLUESKY_PASSWORD` в терминале. Ручное редактирование `.env` нужно только если пропустили ввод или ставите в non-interactive режиме.
+
 ### 3. Перезапустите:
 
 ```bash

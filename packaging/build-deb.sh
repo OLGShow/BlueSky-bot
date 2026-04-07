@@ -21,6 +21,7 @@ mkdir -p "$STAGE/etc/bluesky-bot"
 mkdir -p "$STAGE/var/lib/bluesky-bot"
 mkdir -p "$STAGE/etc/systemd/system"
 mkdir -p "$DIST"
+chmod 0755 "$STAGE/DEBIAN"
 
 # --- DEBIAN metadata ---
 sed "s/^Version:.*/Version: ${VERSION}/" "$SCRIPT_DIR/deb/control" > "$STAGE/DEBIAN/control"
@@ -57,6 +58,10 @@ done
 cp "$REPO_ROOT/requirements.txt" "$STAGE/opt/bluesky-bot/"
 cp "$REPO_ROOT/env.example"       "$STAGE/opt/bluesky-bot/"
 cp "$REPO_ROOT/bot_config.json"   "$STAGE/opt/bluesky-bot/"
+
+# Conffiles must exist in package payload for dpkg-deb
+cp "$REPO_ROOT/env.example" "$STAGE/etc/bluesky-bot/.env"
+cp "$REPO_ROOT/bot_config.json" "$STAGE/etc/bluesky-bot/bot_config.json"
 
 # --- systemd unit (patched for package paths) ---
 cat > "$STAGE/etc/systemd/system/bluesky-bot.service" << 'UNIT'

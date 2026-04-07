@@ -1,0 +1,32 @@
+Origin: OLGShow
+Label: BlueSky Bot APT Repository
+Suite: stable
+Codename: stable
+Architectures: amd64 all
+Components: main
+Description: BlueSky Bot packages for Ubuntu
+Date: Tue, 07 Apr 2026 10:59:53 +0000
+MD5Sum:
+ 8bbdf5c7780dc429e71473fb6b025825              206 Release
+ 1d4ee505771765c6c7ca1d683a8ff710              647 main/binary-all/Packages
+ c7033e54ee698e1ec9bd59c4d86e7e4c              477 main/binary-all/Packages.gz
+ 1d4ee505771765c6c7ca1d683a8ff710              647 main/binary-amd64/Packages
+ c7033e54ee698e1ec9bd59c4d86e7e4c              477 main/binary-amd64/Packages.gz
+SHA1:
+ b87abadf4abff50976f4c901604e7d6647356d51              206 Release
+ 47370306b7e6380540a8e8c76b75330167453614              647 main/binary-all/Packages
+ 05678593f9d38cd9995ef39cbc46e7870ca9edb0              477 main/binary-all/Packages.gz
+ 47370306b7e6380540a8e8c76b75330167453614              647 main/binary-amd64/Packages
+ 05678593f9d38cd9995ef39cbc46e7870ca9edb0              477 main/binary-amd64/Packages.gz
+SHA256:
+ e982da3cdb5321a6c2fae7eccfd8257b8249fb0c54b88bb61d6041af5266d26c              206 Release
+ 8c52c172166ea528968d875e030174aa1d58840cea693c6a8b43486f710a8946              647 main/binary-all/Packages
+ 0363bc24f608b30eacb441188b9037215c6d1888a3a82532b040e062912083c5              477 main/binary-all/Packages.gz
+ 8c52c172166ea528968d875e030174aa1d58840cea693c6a8b43486f710a8946              647 main/binary-amd64/Packages
+ 0363bc24f608b30eacb441188b9037215c6d1888a3a82532b040e062912083c5              477 main/binary-amd64/Packages.gz
+SHA512:
+ 7379f9a9368bed29f9a2bcd5f7e65914fa5f369190a17420dbb25d8b3376cf68ad8322acc01ddb5bbab6e74bef343c82ce7e6cada02dd7a709a5788c39a5644e              206 Release
+ 69a2fe46e600ebf5c42a42da1f6a9bce414e4841052e41caff99bed0b7ac1c0f7a57c336595973b7763a68ef477caa13185cf28b7c8e7d2ee93a89f4120712fe              647 main/binary-all/Packages
+ 72458ff21bde4781f090aa6a7c74a79e2fb9fd179cba1f39a8ba4dc05293d2c6d17bbf50a7e6c4f2d96621bca5aa5f4a97458fa0711eb375c399a5a6dcf205ef              477 main/binary-all/Packages.gz
+ 69a2fe46e600ebf5c42a42da1f6a9bce414e4841052e41caff99bed0b7ac1c0f7a57c336595973b7763a68ef477caa13185cf28b7c8e7d2ee93a89f4120712fe              647 main/binary-amd64/Packages
+ 72458ff21bde4781f090aa6a7c74a79e2fb9fd179cba1f39a8ba4dc05293d2c6d17bbf50a7e6c4f2d96621bca5aa5f4a97458fa0711eb375c399a5a6dcf205ef              477 main/binary-amd64/Packages.gz

@@ -1,0 +1,18 @@
+Package: bluesky-bot
+Version: 3.1.1
+Architecture: all
+Maintainer: OLGShow <olg@example.com>
+Depends: python3 (>= 3.10), python3-venv, python3-pip
+Filename: pool/bluesky-bot_3.1.1_all.deb
+Size: 87602
+MD5sum: ac4c6ca76962ab93c4bb958f4a5ac313
+SHA1: a2f47c6c5b3fa1fa4194e1899b385ac2bd672881
+SHA256: 353ac0901697ca334a02d6b2e651c6fc435220ba942251593ccf606462af0d11
+Section: net
+Priority: optional
+Homepage: https://github.com/OLGShow/BlueSky-bot
+Description: Autonomous AI-powered BlueSky social media bot
+ Intelligent bot for BlueSky with AI content generation,
+ smart engagement, activity budgets, session persistence,
+ and configurable scheduling.
+

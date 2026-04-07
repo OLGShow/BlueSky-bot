@@ -6,6 +6,17 @@ CONF_DIR="/etc/bluesky-bot"
 DATA_DIR="/var/lib/bluesky-bot"
 VENV_DIR="${BOT_DIR}/venv"
 
+set_env_var() {
+    local key="$1"
+    local value="$2"
+    local file="$3"
+    if grep -q "^${key}=" "$file"; then
+        sed -i "s|^${key}=.*|${key}=${value}|" "$file"
+    else
+        echo "${key}=${value}" >> "$file"
+    fi
+}
+
 # Create system user if missing
 if ! id -u bluesky-bot >/dev/null 2>&1; then
     useradd --system --home-dir "$BOT_DIR" --shell /usr/sbin/nologin bluesky-bot
@@ -53,8 +64,31 @@ systemctl daemon-reload
 systemctl enable bluesky-bot.service
 if grep -q "your-bot.bsky.social" "${CONF_DIR}/.env" || grep -q "your-app-password" "${CONF_DIR}/.env"; then
     echo "bluesky-bot: .env contains placeholder credentials."
-    echo "bluesky-bot: service enabled but NOT started. Configure /etc/bluesky-bot/.env and run:"
-    echo "  sudo systemctl restart bluesky-bot"
+
+    # Interactive credential setup (when apt runs in a TTY)
+    if [ -t 0 ]; then
+        read -r -p "Enter BLUESKY_HANDLE (example: my-bot.bsky.social): " BS_HANDLE
+        read -r -s -p "Enter BLUESKY_PASSWORD (app password): " BS_PASSWORD
+        echo ""
+        if [ -n "$BS_HANDLE" ] && [ -n "$BS_PASSWORD" ]; then
+            set_env_var "BLUESKY_HANDLE" "$BS_HANDLE" "${CONF_DIR}/.env"
+            set_env_var "BLUESKY_PASSWORD" "$BS_PASSWORD" "${CONF_DIR}/.env"
+            chown bluesky-bot:bluesky-bot "${CONF_DIR}/.env"
+            chmod 600 "${CONF_DIR}/.env"
+            systemctl restart bluesky-bot.service
+            echo "bluesky-bot: credentials saved and service started."
+        else
+            echo "bluesky-bot: credentials not provided, service not started."
+            echo "bluesky-bot: run:"
+            echo "  sudo nano /etc/bluesky-bot/.env"
+            echo "  sudo systemctl restart bluesky-bot"
+        fi
+    else
+        echo "bluesky-bot: non-interactive install detected."
+        echo "bluesky-bot: run:"
+        echo "  sudo nano /etc/bluesky-bot/.env"
+        echo "  sudo systemctl restart bluesky-bot"
+    fi
 else
     systemctl restart bluesky-bot.service
     echo "bluesky-bot: installed and started"

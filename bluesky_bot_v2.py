@@ -1587,20 +1587,10 @@ class AutonomousBlueskyBotV2:
         
         async def content_creator():
             ai_prompt = f"""
-            Create a trending commentary post about: "{selected_theme}"
-            
-            Requirements:
-            - Provide unique insider perspective nobody else is discussing
-            - Connect to broader implications
-            - Include surprising context or background
-            - Make bold prediction about consequences
-            - Ask provocative question
-            - 200-280 characters
-            - Use urgent, newsy language
-            
-            Format as JSON: {{"post_text": "...", "hashtags": "..."}}
-            
-            Style: "Everyone's talking about {selected_theme}, but here's what they're missing... [unique insight] This will change everything. Mark my words. What do you think happens next? 👀"
+            Create ONE concise social post about "{selected_theme}".
+            Return ONLY JSON with keys "post_text" and "hashtags".
+            post_text: 180-230 chars, concrete angle, one clear implication, one question at the end.
+            hashtags: 2-4 English tags starting with #.
             """
             return await self.generate_structured_post_content(ai_prompt, model_key='powerful')
 
@@ -3320,49 +3310,58 @@ class AutonomousBlueskyBotV2:
         """
         prompt = self.content_service.build_structured_prompt(prompt)
 
+        def _parse_and_normalize(raw: str) -> Optional[Dict[str, str]]:
+            data = None
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                # Be tolerant to wrappers like markdown fences or leading text.
+                m = re.search(r"\{[\s\S]*\}", raw)
+                if m:
+                    data = json.loads(m.group(0))
+                else:
+                    return None
+
+            if not (isinstance(data, dict) and 'post_text' in data and 'hashtags' in data):
+                return None
+
+            post_text = str(data.get('post_text', '')).strip()
+            hashtags = str(data.get('hashtags', '')).strip()
+            if not post_text:
+                return None
+
+            tags = []
+            for token in re.split(r"[,\s]+", hashtags.replace("\n", " ").strip()):
+                t = token.strip()
+                if not t:
+                    continue
+                if not t.startswith('#'):
+                    t = f"#{t}"
+                t = re.sub(r"[^#A-Za-z0-9_]", "", t)
+                if len(t) > 1:
+                    tags.append(t)
+            tags = list(dict.fromkeys(tags))[:4]
+            if len(tags) < 2:
+                tags = ['#tech', '#insight']
+            return {'post_text': post_text, 'hashtags': ' '.join(tags)}
+
         try:
             raw_response = await self.pollinations_ai.generate_content(prompt, model_key=model_key, json_output=True)
             if raw_response:
-                data = None
-                try:
-                    data = json.loads(raw_response)
-                except json.JSONDecodeError:
-                    # Be tolerant to wrappers like markdown fences or leading text.
-                    m = re.search(r"\{[\s\S]*\}", raw_response)
-                    if m:
-                        data = json.loads(m.group(0))
-                    else:
-                        raise
-
-                if isinstance(data, dict) and 'post_text' in data and 'hashtags' in data:
-                    post_text = str(data.get('post_text', '')).strip()
-                    hashtags = str(data.get('hashtags', '')).strip()
-
-                    if not post_text:
-                        return None
-
-                    # Normalize hashtags so they remain parseable and consistent.
-                    tags = []
-                    for token in re.split(r"[,\s]+", hashtags.replace("\n", " ").strip()):
-                        t = token.strip()
-                        if not t:
-                            continue
-                        if not t.startswith('#'):
-                            t = f"#{t}"
-                        t = re.sub(r"[^#A-Za-z0-9_]", "", t)
-                        if len(t) > 1:
-                            tags.append(t)
-                    # Keep only 2-4 tags to reduce spamminess.
-                    tags = list(dict.fromkeys(tags))[:4]
-                    if len(tags) < 2:
-                        tags = ['#tech', '#insight']
-
-                    normalized = {
-                        'post_text': post_text,
-                        'hashtags': ' '.join(tags)
-                    }
+                normalized = _parse_and_normalize(raw_response)
+                if normalized:
                     logger.info("✅ AI сгенерировал структурированный пост (текст + хештеги)")
                     return normalized
+
+            # One lightweight retry with a stricter, faster model when JSON is malformed.
+            if model_key != 'fast':
+                retry_prompt = prompt + "\n\nReturn strict JSON only. No prose outside JSON."
+                retry_raw = await self.pollinations_ai.generate_content(retry_prompt, model_key='fast', json_output=True)
+                if retry_raw:
+                    normalized = _parse_and_normalize(retry_raw)
+                    if normalized:
+                        logger.info("✅ AI сгенерировал структурированный пост (ретрай fast-модель)")
+                        return normalized
         except json.JSONDecodeError:
             logger.error("❌ Ошибка декодирования JSON от AI. Ответ не был в формате JSON.")
         except Exception as e:

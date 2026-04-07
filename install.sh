@@ -16,6 +16,10 @@ ok() { echo -e "${GREEN}[✓]${NC} $*"; }
 warn() { echo -e "${YELLOW}[!]${NC} $*"; }
 err() { echo -e "${RED}[x]${NC} $*"; }
 
+can_prompt_tty() {
+  [[ -r /dev/tty && -w /dev/tty ]]
+}
+
 set_env_var() {
   local key="$1"
   local value="$2"
@@ -67,12 +71,12 @@ sudo apt install -y bluesky-bot
 
 if sudo test -f "${ENV_FILE}"; then
   if sudo grep -Eq "your-bot\.bsky\.social|your-app-password" "${ENV_FILE}"; then
-    if [ -t 0 ]; then
+    if can_prompt_tty; then
       echo
       warn "Credentials are not configured yet. Let's set them now."
-      read -r -p "BLUESKY_HANDLE (example: my-bot.bsky.social): " BS_HANDLE
-      read -r -s -p "BLUESKY_PASSWORD (app password): " BS_PASSWORD
-      echo
+      read -r -p "BLUESKY_HANDLE (example: my-bot.bsky.social): " BS_HANDLE < /dev/tty
+      read -r -s -p "BLUESKY_PASSWORD (app password): " BS_PASSWORD < /dev/tty
+      echo > /dev/tty
 
       if [[ -n "${BS_HANDLE}" && -n "${BS_PASSWORD}" ]]; then
         set_env_var "BLUESKY_HANDLE" "${BS_HANDLE}"
@@ -87,7 +91,7 @@ if sudo test -f "${ENV_FILE}"; then
         echo "  sudo systemctl restart bluesky-bot"
       fi
     else
-      warn "Non-interactive shell detected. Configure credentials manually:"
+      warn "No interactive terminal available. Configure credentials manually:"
       echo "  sudo nano ${ENV_FILE}"
       echo "  sudo systemctl restart bluesky-bot"
     fi

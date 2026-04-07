@@ -26,7 +26,9 @@ class PollinationsAI:
     # Доступные модели с их характеристиками
     MODELS = {
         'creative': 'openai',           # GPT-4o-mini - творческие задачи
-        'powerful': 'openai-large',     # GPT-4o - сложные задачи
+        # Pollinations иногда не поддерживает 'openai-large' (404 Model not found),
+        # поэтому держим 'powerful' на совместимом имени модели.
+        'powerful': 'openai',           # Более надёжный вариант для сложных задач
         'smart': 'claude-hybridspace',  # Claude - аналитика
         'coder': 'qwen-coder',         # Для программирования
         'reasoning': 'deepseek-r1',     # С рассуждениями

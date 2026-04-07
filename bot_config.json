@@ -8,17 +8,11 @@
     "_create_quality_ai_insight": 0.10
   },
   "bluesky_limits": {
-    "max_posts_per_day": 120,
-    "max_posts_per_hour": 8,
-    "current_daily_posts": 100,
-    "safety_margin": "Консервативные лимиты для органичного поведения",
-    "recommended_max_daily": 100,
-    "api_requests_per_5min": 3000,
-    "notes": "Безопасные лимиты для имитации обычного пользователя и избежания спам-детекции.",
+    "max_posts_per_day": 10,
+    "max_interactions_per_cycle": 10,
+    "post_interval_minutes": [60, 90],
     "posting_schedule": {
       "peak_hours_utc": [7, 13, 18, 22],
-      "interval_minutes": "240-360",
-      "posts_per_day": "8-12",
       "focus_on_peak_times": true
     }
   },
@@ -42,14 +36,72 @@
       "current_events_commentary"
     ]
   },
-  "engagement_optimization": {
-    "repost_threshold": 0.25,
-    "comment_threshold": 0.20,
-    "repost_probability": 0.60,
-    "comment_probability": 0.45,
-    "max_reposts_per_cycle": 6,
-    "max_comments_per_cycle": 4,
-    "focus_on_viral_content": true
+  "engagement_settings": {
+    "repost_threshold": 0.40,
+    "repost_threshold_mode": "dynamic_quantile",
+    "repost_quantile": 0.85,
+    "repost_min_threshold": 0.35,
+    "repost_fallback_min_posts": 30,
+    "comment_threshold": 0.65,
+    "repost_probability": 0.30,
+    "comment_probability": 0,
+    "max_reposts_per_cycle": 2,
+    "max_comments_per_cycle": 0,
+    "timeline_page_limit": 100,
+    "timeline_pages": 3,
+    "repost_policy_filter": {
+      "max_conflict_words": 2,
+      "author_cooldown_posts": 3,
+      "max_age_hours": 24
+    }
+  },
+  "relevance_settings": {
+    "topic_groups": {
+      "ai": {
+        "keywords": ["ai", "artificial intelligence", "machine learning", "neural", "llm", "gpt", "chatgpt", "claude", "gemini", "openai", "deep learning", "transformer", "prompt", "copilot"],
+        "weight": 0.12
+      },
+      "tech": {
+        "keywords": ["python", "javascript", "programming", "developer", "software", "code", "coding", "api", "cloud", "devops", "backend", "frontend", "framework", "database", "algorithm", "data", "open source", "startup", "app"],
+        "weight": 0.10
+      },
+      "policy": {
+        "keywords": ["regulation", "policy", "sovereign", "cybersecurity", "privacy", "censorship", "disinformation", "geopolitics", "sanctions", "chips act"],
+        "weight": 0.10
+      },
+      "economy": {
+        "keywords": ["economy", "inflation", "market", "stocks", "trade", "tariff", "gdp", "recession", "productivity", "remote work", "layoffs", "venture", "vc", "funding"],
+        "weight": 0.10
+      },
+      "climate": {
+        "keywords": ["climate", "energy", "renewable", "solar", "nuclear", "carbon", "emissions", "sustainable", "environment", "green", "ev", "battery", "infrastructure"],
+        "weight": 0.10
+      },
+      "science": {
+        "keywords": ["science", "research", "space", "nasa", "physics", "biology", "medicine", "vaccine", "discovery", "experiment"],
+        "weight": 0.08
+      },
+      "culture": {
+        "keywords": ["art", "music", "film", "book", "photography", "design", "creative", "writing", "anime", "gaming"],
+        "weight": 0.06
+      }
+    },
+    "topical_max": 0.45,
+    "keyword_per_match": 0.05,
+    "hashtag_bonus": 0.08,
+    "question_bonus": 0.07,
+    "optimal_length_range": [80, 300],
+    "length_bonus": 0.05,
+    "engagement_log_base": 10,
+    "engagement_max": 0.25,
+    "like_threshold": 0.20
+  },
+  "quality_gate_settings": {
+    "min_signal_density": 0.3,
+    "max_fluff_score": 0.4,
+    "max_semantic_similarity": 0.45,
+    "recent_posts_window": 15,
+    "max_regenerations": 2
   },
   "timing_strategy": {
     "peak_hours_utc": [7, 13, 18, 22],
@@ -111,5 +163,16 @@
     "english_content_percentage": 95,
     "localized_trending_topics": true,
     "cultural_context_awareness": true
+  },
+  "engagement_mode": "open",
+  "engagement_whitelist": [],
+  "activity_budget": {
+    "hourly_points": 4500,
+    "daily_points": 30000
+  },
+  "scheduling": {
+    "timezone": "UTC",
+    "active_windows": [],
+    "quiet_hours": []
   }
 }

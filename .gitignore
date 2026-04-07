@@ -145,6 +145,7 @@ packaging/_stage/
 .vscode/
 .idea/
 .cursor/
+BlueSky-bot/
 *.sublime-project
 *.sublime-workspace
 

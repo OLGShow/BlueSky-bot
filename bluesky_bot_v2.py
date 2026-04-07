@@ -2276,6 +2276,8 @@ class AutonomousBlueskyBotV2:
                         uri=post.post.uri,
                         cid=post.post.cid,
                         score=relevance_score,
+                        author_did=author_did,
+                        author_handle=author_handle,
                     )
                     if liked:
                         interactions += 1

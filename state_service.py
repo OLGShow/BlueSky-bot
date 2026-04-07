@@ -30,6 +30,18 @@ _DEFAULT_RETENTION = {
 }
 
 
+def _atomic_tmp_dir(path: str) -> str:
+    """Return writable real directory for atomic temp file creation.
+
+    If ``path`` is a symlink (e.g. /opt/... -> /var/lib/...), use the real
+    target directory so mkstemp() does not fail on read-only / protected paths.
+    """
+    if os.path.exists(path):
+        return os.path.dirname(os.path.realpath(path)) or '.'
+    parent = os.path.dirname(path) or '.'
+    return os.path.realpath(parent) or '.'
+
+
 def _dt_serial(obj: Any) -> Any:
     if isinstance(obj, datetime):
         return obj.isoformat()
@@ -67,7 +79,7 @@ class StateService:
 
         self._apply_retention(data)
 
-        dir_name = os.path.dirname(self.path) or '.'
+        dir_name = _atomic_tmp_dir(self.path)
         try:
             fd, tmp = tempfile.mkstemp(dir=dir_name, suffix='.tmp')
             with os.fdopen(fd, 'w', encoding='utf-8') as f:
@@ -291,7 +303,7 @@ class ActionLedger:
 
     def _rewrite(self) -> None:
         try:
-            dir_name = os.path.dirname(self.path) or '.'
+            dir_name = _atomic_tmp_dir(self.path)
             fd, tmp = tempfile.mkstemp(dir=dir_name, suffix='.tmp')
             with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 for key, ts in self._keys.items():
@@ -306,7 +318,7 @@ class AtomicConfigWriter:
 
     @staticmethod
     def save(config: dict, path: str) -> None:
-        dir_name = os.path.dirname(path) or '.'
+        dir_name = _atomic_tmp_dir(path)
         fd, tmp = tempfile.mkstemp(dir=dir_name, suffix='.tmp')
         try:
             with os.fdopen(fd, 'w', encoding='utf-8') as f:
@@ -383,7 +395,7 @@ class SingleInstanceLock:
             self._write()
 
     def _write(self) -> None:
-        dir_name = os.path.dirname(self.path) or '.'
+        dir_name = _atomic_tmp_dir(self.path)
         fd, tmp = tempfile.mkstemp(dir=dir_name, suffix='.tmp')
         try:
             with os.fdopen(fd, 'w', encoding='utf-8') as f:
@@ -435,7 +447,7 @@ class SessionStore:
         self.max_age = timedelta(hours=max_age_hours)
 
     def save(self, session_string: str) -> None:
-        dir_name = os.path.dirname(self.path) or '.'
+        dir_name = _atomic_tmp_dir(self.path)
         fd, tmp = tempfile.mkstemp(dir=dir_name, suffix='.tmp')
         try:
             with os.fdopen(fd, 'w', encoding='utf-8') as f:

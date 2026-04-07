@@ -117,4 +117,4 @@ systemctl status bluesky-bot 2>/dev/null || echo "service removed"
 
 ---
 
-Последнее обновление: Апрель 2026
+Последнее обновление: Апрель 2026 (workflow check)

@@ -363,6 +363,14 @@ class AutonomousBlueskyBotV2:
         # Загрузка внешней конфигурации
         self.config = self.load_external_config()
 
+        # Порог качества публикации из конфига (по умолчанию прежнее значение 0.7)
+        quality_cfg = self.config.get('quality_gate_settings', {})
+        cfg_min_quality = quality_cfg.get('min_combined_score', self.min_post_quality_score)
+        try:
+            self.min_post_quality_score = max(0.4, min(float(cfg_min_quality), 0.95))
+        except (TypeError, ValueError):
+            pass
+
         # Применяем лимиты из конфига (с безопасным потолком)
         limits = self.config.get('bluesky_limits', {})
         interval = limits.get('post_interval_minutes', [60, 90])

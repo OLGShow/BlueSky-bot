@@ -11,15 +11,26 @@ __pycache__
 venv/
 env/
 .venv/
+
+# Secrets — NEVER include in images
+.env
 .env.local
 .env.*.local
 
-# Bot data
+# Bot data / state
 bot_memory.pkl
+bot_memory.json
 bot.log
 *.log
 logs/
 data/
+rss_source_state.json
+bot_heartbeat.txt
+action_ledger.jsonl
+dry_run_report.json
+reports/
+session.json
+bot.lock
 
 # Development
 .vscode/

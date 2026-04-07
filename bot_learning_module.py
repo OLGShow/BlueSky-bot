@@ -2,6 +2,11 @@ import json
 import logging
 from datetime import datetime, timedelta
 
+try:
+    from state_service import AtomicConfigWriter
+except ImportError:
+    AtomicConfigWriter = None
+
 logger = logging.getLogger(__name__)
 
 class BotLearningModule:
@@ -15,8 +20,11 @@ class BotLearningModule:
             return json.load(f)
 
     def save_config(self):
-        with open(self.config_file, 'w') as f:
-            json.dump(self.config, f, indent=2)
+        if AtomicConfigWriter:
+            AtomicConfigWriter.save(self.config, self.config_file)
+        else:
+            with open(self.config_file, 'w') as f:
+                json.dump(self.config, f, indent=2)
 
     def analyze_performance_and_learn(self):
         """

@@ -5,12 +5,12 @@
 ИСПРАВЛЕНА ПРОБЛЕМА МАССОВОЙ ПУБЛИКАЦИИ И УЛУЧШЕНО КАЧЕСТВО КОНТЕНТА
 """
 
-# Копируем весь код из bluesky_bot.py и добавляем импорты для форматирования
 import asyncio
 import random
 import json
 import os
 import logging
+from logging.handlers import RotatingFileHandler
 from datetime import datetime, timedelta
 from collections import Counter, defaultdict
 from typing import List, Dict, Optional, Set, Tuple
@@ -21,11 +21,11 @@ from dynamic_content_system import BlueSkyTrendingTracker, DynamicContentGenerat
 import openai
 from openai import AsyncOpenAI
 from dataclasses import dataclass, asdict, field
-import pickle
 import re
 import time
 import html
 import hashlib
+from dotenv import load_dotenv
 from bot_learning_module import BotLearningModule
 
 # Новые импорты для форматирования
@@ -37,9 +37,37 @@ from pollinations_adapter import PollinationsAI
 
 # Импорт улучшений AI
 from ai_improvements import ContentQualityAnalyzer, EngagementOptimizer
+from growth_engine import (
+    QualityGate, ABEngine, TrendRadar, RepostPolicyFilter,
+    DryRunAction, generate_daily_report, save_daily_report,
+)
+from rss_source_manager import RSSSourceManager
+from state_service import (
+    StateService, ActionLedger, AtomicConfigWriter,
+    SingleInstanceLock, SessionStore, ActivityBudget,
+)
+from resilience_service import (
+    CircuitBreaker, RetryPolicy, ErrorClass, classify_error, backoff_seconds,
+)
+from log_sanitizer import SanitizingFilter
+from engagement_service import EngagementService
+from content_service import ContentService
 
 # Настройка логирования с абсолютным путем
 import sys
+
+# На Windows консоль часто в cp1251/cp866, из-за чего эмодзи ломают logging.
+# Принудительно переключаем stdout/stderr на UTF-8, чтобы не падать при логировании.
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 # Определяем путь к файлу лога
 if hasattr(sys, '_MEIPASS'):
@@ -54,66 +82,96 @@ log_file_path = os.path.join(log_dir, 'bot.log')
 # Создаем директорию если не существует
 os.makedirs(log_dir, exist_ok=True)
 
-# Настройка логирования
+# Ограничения логов для маленького диска (40GB)
+LOG_MAX_BYTES = int(os.getenv('LOG_MAX_BYTES', 20 * 1024 * 1024))        # 20MB на файл
+LOG_BACKUP_COUNT = int(os.getenv('LOG_BACKUP_COUNT', 8))                  # до 8 ротаций
+LOG_TOTAL_BUDGET_BYTES = int(os.getenv('LOG_TOTAL_BUDGET_BYTES', 1024 * 1024 * 1024))  # 1GB суммарно
+
+
+def _cleanup_log_budget(directory: str, budget_bytes: int) -> tuple[int, int]:
+    """Удаляет самые старые log-файлы, если суммарный размер > budget_bytes."""
+    candidates = []
+    for name in os.listdir(directory):
+        if not name.endswith('.log') and '.log.' not in name:
+            continue
+        path = os.path.join(directory, name)
+        if os.path.isfile(path):
+            try:
+                st = os.stat(path)
+                candidates.append((path, st.st_mtime, st.st_size))
+            except OSError:
+                continue
+
+    total = sum(s for _, _, s in candidates)
+    removed_files = 0
+    removed_bytes = 0
+    if total <= budget_bytes:
+        return removed_files, removed_bytes
+
+    # Удаляем самые старые сначала
+    for path, _, size in sorted(candidates, key=lambda x: x[1]):
+        # Никогда не удаляем активный bot.log
+        if os.path.basename(path) == 'bot.log':
+            continue
+        try:
+            os.remove(path)
+            removed_files += 1
+            removed_bytes += size
+            total -= size
+            if total <= budget_bytes:
+                break
+        except OSError:
+            continue
+    return removed_files, removed_bytes
+
+# Настройка логирования с санитизацией
+_sanitizer = SanitizingFilter()
+_file_handler = RotatingFileHandler(
+    log_file_path, encoding='utf-8', maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT
+)
+_file_handler.addFilter(_sanitizer)
+_console_handler = logging.StreamHandler(sys.stdout)
+_console_handler.addFilter(_sanitizer)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(log_file_path, encoding='utf-8', mode='a'),
-        logging.StreamHandler(sys.stdout)
-    ],
-    force=True  # Принудительно переконфигурировать логирование
+    handlers=[_file_handler, _console_handler],
+    force=True,
 )
 logger = logging.getLogger(__name__)
+
+# Audit logger — отдельный файл для аудита действий
+_audit_handler = RotatingFileHandler(
+    os.path.join(log_dir, 'audit.log'),
+    encoding='utf-8',
+    maxBytes=max(5 * 1024 * 1024, LOG_MAX_BYTES // 2),
+    backupCount=max(4, LOG_BACKUP_COUNT // 2),
+)
+_audit_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+_audit_handler.addFilter(_sanitizer)
+audit_logger = logging.getLogger('audit')
+audit_logger.addHandler(_audit_handler)
+audit_logger.propagate = False
 
 # Логируем путь к файлу для отладки
 logger.info(f"📝 Логирование настроено. Файл лога: {log_file_path}")
 logger.info(f"📂 Рабочая директория: {os.getcwd()}")
 logger.info(f"🐍 Python путь: {sys.executable}")
+removed_files, removed_bytes = _cleanup_log_budget(log_dir, LOG_TOTAL_BUDGET_BYTES)
+if removed_files:
+    logger.warning(
+        f"🧹 Очистка логов по бюджету: удалено {removed_files} файлов, "
+        f"освобождено {removed_bytes / (1024 * 1024):.1f} MB"
+    )
 
-# В начало файла добавляю новый безопасный режим
-# БЕЗОПАСНЫЙ РЕЖИМ - МИНИМАЛЬНАЯ АВТОМАТИЗАЦИЯ
-SAFE_MODE = True  # Включить для соблюдения правил Bluesky
-MAX_DAILY_ACTIONS = 5  # Максимум 5 действий в день
-HUMAN_LIKE_DELAYS = (3600, 7200)  # 1-2 часа между действиями
-
-# НОВОЕ: Соблюдение правил BlueSky - NO UNSOLICITED ENGAGEMENT
+# Соблюдение правил BlueSky
 BLUESKY_COMPLIANT_MODE = True  # Отключает автоматические комментарии и упоминания
 NO_AUTO_COMMENTS = True  # Никаких автоматических комментариев (нарушение правил)
 NO_AUTO_MENTIONS = True  # Никаких автоматических упоминаний (нарушение правил)
 ONLY_LIKES_AND_REPOSTS = True  # Только лайки, репосты, подписки и собственные посты
 
-# Определяем путь к файлу лога
-if hasattr(sys, '_MEIPASS'):
-    # Если запущено из pyinstaller
-    log_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-else:
-    # Обычный запуск
-    log_dir = os.path.dirname(os.path.abspath(__file__))
 
-log_file_path = os.path.join(log_dir, 'bot.log')
-
-# Создаем директорию если не существует
-os.makedirs(log_dir, exist_ok=True)
-
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(log_file_path, encoding='utf-8', mode='a'),
-        logging.StreamHandler(sys.stdout)
-    ],
-    force=True  # Принудительно переконфигурировать логирование
-)
-logger = logging.getLogger(__name__)
-
-# Логируем путь к файлу для отладки
-logger.info(f"📝 Логирование настроено. Файл лога: {log_file_path}")
-logger.info(f"📂 Рабочая директория: {os.getcwd()}")
-logger.info(f"🐍 Python путь: {sys.executable}")
-
-# Используем тот же класс BotMemory из оригинального файла
 @dataclass
 class BotMemory:
     """Память бота для самообучения"""
@@ -131,62 +189,22 @@ class BotMemory:
     repost_performance: List[Dict] = field(default_factory=list)
     viral_posts: List[Dict] = field(default_factory=list)
     engagement_metrics: Dict[str, float] = field(default_factory=dict)
+    # Growth engine fields
+    ab_results: Dict = field(default_factory=dict)
+    topic_outcomes: Dict[str, Dict] = field(default_factory=dict)
+    source_outcomes: Dict[str, Dict] = field(default_factory=dict)
+    pattern_blacklist: List[str] = field(default_factory=list)
     
-    def save(self, filename: str = 'bot_memory.pkl'):
-        """Сохранение памяти в файл"""
-        with open(filename, 'wb') as f:
-            pickle.dump(self, f)
-    
+    _state_svc = StateService()
+
+    def save(self, filename: str = 'bot_memory.json'):
+        """Сохранение памяти через StateService (JSON, атомарная запись)."""
+        self._state_svc.save(self)
+
     @classmethod
-    def load(cls, filename: str = 'bot_memory.pkl'):
-        """Загрузка памяти из файла с обратной совместимостью"""
-        if os.path.exists(filename):
-            try:
-                with open(filename, 'rb') as f:
-                    memory = pickle.load(f)
-                    
-                # Проверяем наличие новых полей и добавляем их если отсутствуют
-                if not hasattr(memory, 'published_content_hashes'):
-                    memory.published_content_hashes = set()
-                    logger.info("🔧 Добавлено поле published_content_hashes для совместимости")
-                    
-                if not hasattr(memory, 'published_urls'):
-                    memory.published_urls = set()
-                    logger.info("🔧 Добавлено поле published_urls для совместимости")
-                
-                # НОВОЕ: Добавляем поля для tracking вирусности
-                if not hasattr(memory, 'repost_performance'):
-                    memory.repost_performance = []
-                    logger.info("🔧 Добавлено поле repost_performance для tracking репостов")
-                
-                if not hasattr(memory, 'viral_posts'):
-                    memory.viral_posts = []
-                    logger.info("🔧 Добавлено поле viral_posts для tracking вирусных постов")
-                
-                if not hasattr(memory, 'engagement_metrics'):
-                    memory.engagement_metrics = {}
-                    logger.info("🔧 Добавлено поле engagement_metrics для метрик вовлеченности")
-                    
-                return memory
-            except Exception as e:
-                logger.warning(f"⚠️ Ошибка загрузки памяти: {e}, создаем новую")
-                pass
-        
-        return cls(
-            successful_posts=[],
-            failed_posts=[],
-            interaction_patterns={},
-            trending_topics={},
-            user_relationships={},
-            content_performance={},
-            last_update=datetime.now(),
-            published_content_hashes=set(),
-            published_urls=set(),
-            # НОВОЕ: Инициализация полей tracking
-            repost_performance=[],
-            viral_posts=[],
-            engagement_metrics={}
-        )
+    def load(cls, filename: str = 'bot_memory.json'):
+        """Загрузка памяти через StateService (JSON с миграцией с pickle)."""
+        return cls._state_svc.load(cls)
 
 class AutonomousBlueskyBotV2:
     """Улучшенная версия бота с качественным оформлением постов"""
@@ -204,6 +222,9 @@ class AutonomousBlueskyBotV2:
         # Клиенты для BlueSky
         self.bluesky_client = AsyncClient()
         self.authenticated = False
+        self.session_store = SessionStore(
+            path=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'session.json')
+        )
         
         # Единая HTTP сессия для всех операций с таймаутами
         self.http_session = None
@@ -236,10 +257,9 @@ class AutonomousBlueskyBotV2:
             logger.info("   ✅ Лайки и репосты: РАЗРЕШЕНЫ")
             logger.info("   ✅ Собственные посты: РАЗРЕШЕНЫ")
         
-        # УЛУЧШЕННЫЕ НАСТРОЙКИ ДЛЯ 100 ПОСТОВ/ДЕНЬ (безопасно в пределах лимитов BlueSky)
-        self.post_interval = (60, 90)  # ИЗМЕНЕНО: Интервал 60-90 минут между постами (более человечно)
-        self.max_posts_per_day = 10  # ИЗМЕНЕНО: Максимум 10 постов в день (как обычный пользователь)
-        self.max_interactions_per_cycle = 5  # ИЗМЕНЕНО: Максимум 5 взаимодействий за цикл (более естественно)
+        self.post_interval = (60, 90)
+        self.max_posts_per_day = 10
+        self.max_interactions_per_cycle = 5
         self.daily_post_count = 0
         self.last_post_date = datetime.now().date()
         
@@ -343,6 +363,14 @@ class AutonomousBlueskyBotV2:
         # Загрузка внешней конфигурации
         self.config = self.load_external_config()
 
+        # Применяем лимиты из конфига (с безопасным потолком)
+        limits = self.config.get('bluesky_limits', {})
+        interval = limits.get('post_interval_minutes', [60, 90])
+        if isinstance(interval, list) and len(interval) >= 2:
+            self.post_interval = (interval[0], interval[1])
+        self.max_posts_per_day = min(limits.get('max_posts_per_day', 10), 50)
+        self.max_interactions_per_cycle = limits.get('max_interactions_per_cycle', 5)
+
         # Инициализация модуля обучения
         self.learning_module = BotLearningModule(self.memory, 'bot_config.json')
         
@@ -353,7 +381,49 @@ class AutonomousBlueskyBotV2:
         # НОВОЕ: Инициализация улучшенных AI компонентов
         self.content_analyzer = ContentQualityAnalyzer()
         self.engagement_optimizer = EngagementOptimizer()
-        
+
+        # Action ledger for idempotency
+        self.action_ledger = ActionLedger()
+        self.engagement_service = EngagementService(self)
+        self.content_service = ContentService(self)
+
+        # Activity budget (ATProto write-point caps)
+        budget_cfg = self.config.get('activity_budget', {})
+        self.activity_budget = ActivityBudget(
+            hourly_limit=budget_cfg.get('hourly_points', 4500),
+            daily_limit=budget_cfg.get('daily_points', 30000),
+            action_costs=budget_cfg.get('action_costs'),
+        )
+
+        # Per-subsystem circuit breakers
+        self._cb_bluesky = CircuitBreaker('bluesky_api', failure_threshold=5, recovery_timeout=300)
+        self._cb_ai = CircuitBreaker('ai_generation', failure_threshold=3, recovery_timeout=180)
+        self._cb_rss = CircuitBreaker('rss_fetch', failure_threshold=4, recovery_timeout=120)
+
+        # Growth Engine
+        self.dry_run = os.getenv('DRY_RUN', 'false').lower() in ('true', '1', 'yes')
+        self.dry_run_log = DryRunAction() if self.dry_run else None
+        # A/B suffix for current generation cycle
+        self._current_ab_format = 'format_a'
+        self._current_ab_suffix = ''
+        self._quality_gate_regen_mode = False
+        # Circuit breaker (main loop level)
+        self._consecutive_errors = 0
+        # Trend Radar signal caches
+        self._trend_timeline_snippets: list = []
+        self._trend_rss_headlines: list = []
+        # Async task registry
+        self._background_tasks: set = set()
+        self.quality_gate = QualityGate(self.config)
+        self.ab_engine = ABEngine(self.memory.ab_results)
+        rel_groups = self.config.get('relevance_settings', {}).get('topic_groups', {})
+        self.trend_radar = TrendRadar(rel_groups)
+        self.repost_policy = RepostPolicyFilter(self.config)
+        self.rss_manager = RSSSourceManager(self.config, self.http_session)
+        self.recent_repost_authors: List[str] = []
+        if self.dry_run:
+            logger.info("🧪 DRY-RUN режим: никакие действия не будут выполнены")
+
         # Система мониторинга активности (heartbeat)
         self.last_heartbeat = datetime.now()
         self.heartbeat_file = 'bot_heartbeat.txt'
@@ -407,6 +477,49 @@ class AutonomousBlueskyBotV2:
         )
         logger.info("🌐 HTTP сессия создана с защитными таймаутами")
     
+    def _is_posting_window(self) -> bool:
+        """Check scheduling config (quiet_hours / active_windows).
+
+        Returns True if no scheduling constraints are configured (backward compat).
+        """
+        sched = self.config.get('scheduling', {})
+        tz_name = sched.get('timezone', 'UTC')
+        quiet_hours = sched.get('quiet_hours', [])
+        active_windows = sched.get('active_windows', [])
+
+        # If nothing is configured, always allow
+        if not quiet_hours and not active_windows:
+            return True
+
+        try:
+            import zoneinfo
+            tz = zoneinfo.ZoneInfo(tz_name)
+        except Exception:
+            tz = None
+
+        now = datetime.now(tz)
+        current_hour = now.hour
+
+        # quiet_hours: list of hours where posting is suppressed
+        if quiet_hours and current_hour in quiet_hours:
+            return False
+
+        # active_windows: list of [start_hour, end_hour] ranges
+        if active_windows:
+            for window in active_windows:
+                if not isinstance(window, (list, tuple)) or len(window) < 2:
+                    continue
+                start, end = int(window[0]), int(window[1])
+                if start <= end:
+                    if start <= current_hour < end:
+                        return True
+                else:
+                    if current_hour >= start or current_hour < end:
+                        return True
+            return False
+
+        return True
+
     def _update_heartbeat(self) -> None:
         """Обновляет файл heartbeat для мониторинга активности"""
         try:
@@ -534,14 +647,12 @@ class AutonomousBlueskyBotV2:
         logger.debug(f"📝 Контент отмечен как опубликованный: {content_hash[:8]}...")
     
     def _cleanup_old_content_hashes(self) -> None:
-        """Очищает старые хеши контента (запускается периодически)"""
-        # Очищаем хеши старше 30 дней на основе successful_posts
+        """Очищает старые хеши контента и применяет retention к спискам памяти."""
         cutoff_date = datetime.now() - timedelta(days=30)
-        
-        # Собираем хеши из недавних постов
+
         recent_hashes = set()
         recent_urls = set()
-        
+
         for post in self.memory.successful_posts:
             if post.get('timestamp'):
                 try:
@@ -551,17 +662,29 @@ class AutonomousBlueskyBotV2:
                             recent_hashes.add(post['content_hash'])
                         if 'url' in post:
                             recent_urls.add(post['url'])
-                except:
+                except Exception:
                     pass
-        
-        # Обновляем множества только недавними хешами
+
         old_hash_count = len(self.memory.published_content_hashes)
         old_url_count = len(self.memory.published_urls)
-        
         self.memory.published_content_hashes = recent_hashes
         self.memory.published_urls = recent_urls
-        
-        logger.info(f"🧹 Очищены старые хеши: {old_hash_count} -> {len(recent_hashes)}, URLs: {old_url_count} -> {len(recent_urls)}")
+        logger.info(f"🧹 Хеши: {old_hash_count}->{len(recent_hashes)}, URLs: {old_url_count}->{len(recent_urls)}")
+
+        # Retention: trim long-lived lists
+        retention_limits = {
+            'successful_posts': 500,
+            'failed_posts': 200,
+            'repost_performance': 200,
+            'viral_posts': 100,
+            'pattern_blacklist': 50,
+        }
+        for attr, limit in retention_limits.items():
+            lst = getattr(self.memory, attr, None)
+            if lst is not None and isinstance(lst, list) and len(lst) > limit:
+                old_len = len(lst)
+                setattr(self.memory, attr, lst[-limit:])
+                logger.info(f"🧹 Retention {attr}: {old_len}->{limit}")
     
     def _cleanup_old_commented_posts(self) -> None:
         """Очищает старые записи о всех взаимодействиях (старше 7 дней)"""
@@ -705,50 +828,69 @@ class AutonomousBlueskyBotV2:
             fallback_creator
         )
 
-    async def authenticate(self) -> bool:
-        """Аутентификация в Bluesky с обработкой rate limit"""
-        # Инициализируем HTTP сессию если еще не создана
+    async def authenticate(self, force_login: bool = False) -> bool:
+        """Session-first auth: restore persisted session, fallback to login."""
         if not self.http_session:
             self.http_session = aiohttp.ClientSession()
             logger.info("🌐 HTTP сессия инициализирована")
-        
+
+        # --- Phase 1: try restoring a persisted session ---
+        if not force_login:
+            saved = self.session_store.load()
+            if saved:
+                try:
+                    profile = await self.bluesky_client.login(session_string=saved)
+                    self.authenticated = True
+                    self._persist_session()
+                    logger.info(f"✅ Сессия восстановлена для {getattr(profile, 'handle', self.handle)}")
+                    return True
+                except Exception as e:
+                    logger.warning(f"⚠️ Не удалось восстановить сессию: {e}. Переход к login.")
+                    self.session_store.clear()
+
+        # --- Phase 2: full login with retry ---
         max_retries = 3
-        base_delay = 60  # Начальная задержка в секундах
-        
+        base_delay = 60
+
         for attempt in range(max_retries):
             try:
                 await self.bluesky_client.login(self.handle, self.password)
-                logger.info(f"✅ Успешная авторизация: {self.handle}")
                 self.authenticated = True
+                self._persist_session()
+                logger.info(f"✅ Успешная авторизация: {self.handle}")
                 return True
-                
             except Exception as e:
-                error_str = str(e)
-                
-                # Обработка rate limit (429 ошибки)
-                if "429" in error_str or "Rate Limit" in error_str or "RateLimitExceeded" in error_str:
-                    delay = base_delay * (2 ** attempt)  # Экспоненциальная задержка
-                    logger.warning(f"⚠️ Rate limit достигнут. Попытка {attempt + 1}/{max_retries}")
-                    logger.info(f"⏳ Ожидание {delay} секунд перед повторной попыткой...")
-                    
-                    if attempt < max_retries - 1:  # Не ждем после последней попытки
+                ec = classify_error(e)
+                if ec == ErrorClass.RATE_LIMIT:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(f"⚠️ Rate limit. Попытка {attempt + 1}/{max_retries}, backoff {delay}s")
+                    if attempt < max_retries - 1:
                         await asyncio.sleep(delay)
                         continue
-                    else:
-                        logger.error(f"❌ Достигнуто максимальное количество попыток авторизации")
-                        return False
-                else:
-                    # Другие ошибки авторизации
-                    logger.error(f"❌ Ошибка авторизации: {e}")
+                    logger.error("❌ Достигнуто макс. кол-во попыток авторизации (rate limit)")
                     return False
-                    
+                logger.error(f"❌ Ошибка авторизации ({ec.value}): {e}")
+                return False
         return False
+
+    def _persist_session(self) -> None:
+        try:
+            ss = self.bluesky_client.export_session_string()
+            if ss:
+                self.session_store.save(ss)
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось сохранить сессию: {e}")
     
     # НОВЫЕ МЕТОДЫ ДЛЯ КРАСИВЫХ ПОСТОВ
     
     async def create_scheduled_post(self) -> None:
         """ИСПРАВЛЕННОЕ создание запланированного поста с контролем качества и динамическими весами"""
         try:
+            # Budget gate — check before any generation work
+            if not self.activity_budget.can_spend('post'):
+                logger.info("📊 Activity budget exhausted for posting — skipping cycle")
+                return
+
             # Проверяем дневной лимит
             current_date = datetime.now().date()
             if current_date != self.last_post_date:
@@ -773,9 +915,60 @@ class AutonomousBlueskyBotV2:
                 logger.error("❌ Не найдено ни одной валидной стратегии в конфигурации!")
                 return
             
+            # A/B format selection — persist suffix so generators can read it
+            ab_format = self.ab_engine.pick_format()
+            self._current_ab_format = ab_format
+            self._current_ab_suffix = self.ab_engine.get_prompt_suffix(ab_format)
+            logger.info(f"🔬 A/B формат: {ab_format} | suffix len={len(self._current_ab_suffix)}")
+
+            # Trend Radar: topic of the day from successful_posts + cached timeline + RSS headlines
+            trend_topic = None
+            try:
+                trend_texts = [p.get('text', '')[:200] for p in self.memory.successful_posts[-50:]]
+                # Add cached timeline snippets (populated in smart_engagement)
+                trend_texts += getattr(self, '_trend_timeline_snippets', [])
+                # Add RSS headlines from the last fetch (populated in fetch_external_content)
+                trend_texts += getattr(self, '_trend_rss_headlines', [])
+                trend_topic = self.trend_radar.get_topic_of_day(trend_texts)
+                if trend_topic:
+                    logger.info(f"📡 Trend Radar: тема дня = {trend_topic} (из {len(trend_texts)} текстов)")
+            except Exception:
+                pass
+
+            # Audience memory: boost strategy weights for top-performing topics
+            if trend_topic and self.memory.topic_outcomes:
+                outcomes = self.memory.topic_outcomes
+                if trend_topic in outcomes and outcomes[trend_topic].get('count', 0) > 0:
+                    topic_er = outcomes[trend_topic]['total_er'] / outcomes[trend_topic]['count']
+                    strategies = [
+                        (fn, w * (1.3 if trend_topic in (fn.__name__ if callable(fn) else '') else 1.0))
+                        for fn, w in strategies
+                    ]
+                    logger.info(f"🧠 Audience memory: буст для темы '{trend_topic}' (avg ER={topic_er:.2f})")
+
             # Взвешенный выбор стратегии
             strategy = self._weighted_choice(strategies)
             post = await strategy()
+
+            # Quality Gate с авто-регенерацией (усиленный промпт при рестарте)
+            regen_count = 0
+            max_regen = self.quality_gate.max_regen
+            recent_texts = [p.get('text', '') for p in self.memory.successful_posts[-20:]]
+            while post and hasattr(post, 'text') and post.text:
+                gate_ok, gate_reason = self.quality_gate.check(post.text, recent_texts)
+                if gate_ok:
+                    logger.info(f"✅ Quality Gate пройден (попытка {regen_count + 1})")
+                    break
+                regen_count += 1
+                logger.warning(f"⚠️ Quality Gate не пройден: {gate_reason} (попытка {regen_count}/{max_regen})")
+                if regen_count > max_regen:
+                    post = None
+                    break
+                # Передаём флаг "нужен усиленный промпт" через self
+                self._quality_gate_regen_mode = True
+                strategy = self._weighted_choice(strategies)
+                post = await strategy()
+                self._quality_gate_regen_mode = False
             
             if post and self._evaluate_post_quality(post):
                 # Проверяем на дубликаты еще раз перед публикацией
@@ -795,17 +988,22 @@ class AutonomousBlueskyBotV2:
                         logger.warning("⚠️ Не удалось создать альтернативный пост. Пропускаем публикацию.")
                         return
                 
-                # Публикуем с правильными facets
+                # Публикуем (или dry-run)
+                if self.dry_run:
+                    self.dry_run_log.log('send_post', text=post.text[:120], format=getattr(self, '_last_ab_format', 'unknown'))
+                    return
+
                 created = await self.bluesky_client.send_post(
                     text=post.text,
                     facets=post.facets if post.facets else None,
                     embed=post.embed if hasattr(post, 'embed') and post.embed else None,
-                    langs=post.langs if hasattr(post, 'langs') and post.langs else ['ru']
+                    langs=post.langs if hasattr(post, 'langs') and post.langs else ['en']
                 )
+                self.activity_budget.spend('post')
                 
-                # ПОМЕЧАЕМ КОНТЕНТ КАК ОПУБЛИКОВАННЫЙ
+                self.ab_engine.record_impression(ab_format)
                 self._mark_content_as_published(post.text, url, image_url)
-                
+
                 self.session_stats['posts_created'] += 1
                 self.daily_post_count += 1
                 logger.info(f"✅ Опубликован качественный пост #{self.daily_post_count}: {post.text[:80].replace(chr(10), ' ')}...")
@@ -822,11 +1020,12 @@ class AutonomousBlueskyBotV2:
                     'content_hash': content_hash,
                     'url': url,
                     'image_url': image_url,
-                    # НОВОЕ: Вирусные метрики
+                    'ab_format': ab_format,
+                    # Вирусные метрики
                     'viral_score': getattr(post, 'viral_score', 0.0),
                     'viral_factors': getattr(post, 'viral_factors', []),
-                    'predicted_engagement': 0,  # Будет обновлено позже
-                    'actual_engagement': 0      # Будет обновлено при анализе
+                    'predicted_engagement': 0,
+                    'actual_engagement': 0
                 }
                 
                 self.memory.successful_posts.append(post_data)
@@ -843,8 +1042,8 @@ class AutonomousBlueskyBotV2:
                     })
                     logger.info(f"🔥 Пост добавлен в список потенциально вирусных (score: {getattr(post, 'viral_score', 0.0):.2f})")
                 
-                # Планируем отложенный анализ производительности
-                asyncio.create_task(self.delayed_performance_check(created.uri, 3600))
+                # Планируем отложенный анализ производительности (1h, 6h, 24h)
+                self.content_service.schedule_post_performance_checks(created.uri)
                 
             else:
                 logger.warning("⚠️ Пост не прошел проверку качества. Пропускаем публикацию.")
@@ -853,6 +1052,15 @@ class AutonomousBlueskyBotV2:
             logger.error(f"❌ Ошибка создания поста: {e}")
             self.session_stats['errors'] += 1
     
+    def _spawn_background(self, coro) -> None:
+        """Register a background task; auto-discard on completion."""
+        if len(self._background_tasks) >= 50:
+            logger.warning("Background task limit (50) reached — skipping new task")
+            return
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
     def _weighted_choice(self, strategies: List[Tuple]) -> callable:
         """Взвешенный выбор стратегии создания поста"""
         functions, weights = zip(*strategies)
@@ -1723,20 +1931,44 @@ class AutonomousBlueskyBotV2:
                     if source_entries:
                         all_entries.extend(source_entries)
                         sources_used += 1
-                        
+
                         source_name = feed.feed.title if hasattr(feed.feed, 'title') else feed_url.split('//')[-1].split('/')[0]
                         logger.info(f"✅ {source_name}: {len(source_entries)} записей за {fetch_time:.1f}с")
-                    
+                        # RSS Source Intelligence: record success
+                        try:
+                            self.rss_manager.record_fetch(
+                                feed_url,
+                                success=True,
+                                latency=fetch_time,
+                                entries=len(source_entries),
+                                duplicates=entries_to_process - len(source_entries),
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            self.rss_manager.record_fetch(feed_url, success=False, latency=fetch_time)
+                        except Exception:
+                            pass
+
                     # Пауза между источниками для вежливости
                     await asyncio.sleep(0.3)
-                        
+
             except asyncio.TimeoutError:
                 source_name = feed_url.split('//')[-1].split('/')[0]
                 logger.warning(f"⏰ {source_name}: таймаут ({timeout}с)")
+                try:
+                    self.rss_manager.record_fetch(feed_url, success=False, latency=float(timeout))
+                except Exception:
+                    pass
                 continue
             except Exception as e:
                 source_name = feed_url.split('//')[-1].split('/')[0]
                 logger.warning(f"❌ {source_name}: {str(e)[:80]}...")
+                try:
+                    self.rss_manager.record_fetch(feed_url, success=False, latency=0.0)
+                except Exception:
+                    pass
                 continue
         
         # Удаляем дубликаты и сортируем по приоритету
@@ -1756,7 +1988,10 @@ class AutonomousBlueskyBotV2:
         # Возвращаем топ записи
         final_entries = prioritized_entries[:10]
         logger.info(f"📋 Выбрано {len(final_entries)} лучших записей для использования")
-        
+
+        # Trend Radar feed: save RSS headlines for topic-of-day detection
+        self._trend_rss_headlines = [e.get('title', '') for e in prioritized_entries[:30]]
+
         return final_entries
     
     def _enhanced_image_extraction(self, entry) -> Optional[str]:
@@ -1938,7 +2173,21 @@ class AutonomousBlueskyBotV2:
     async def smart_engagement(self) -> None:
         """УЛУЧШЕННОЕ умное взаимодействие с репостами и комментариями"""
         try:
-            timeline = await self.bluesky_client.get_timeline(limit=50)
+            page_limit = int(self.config.get('engagement_settings', {}).get('timeline_page_limit', 100))
+            max_pages = int(self.config.get('engagement_settings', {}).get('timeline_pages', 3))
+            page_limit = max(20, min(page_limit, 100))
+            max_pages = max(1, min(max_pages, 5))
+
+            # Собираем несколько страниц ленты, чтобы анализировать больше кандидатов.
+            feed_items = []
+            cursor = None
+            for _ in range(max_pages):
+                timeline_page = await self.bluesky_client.get_timeline(limit=page_limit, cursor=cursor)
+                page_feed = getattr(timeline_page, 'feed', []) or []
+                feed_items.extend(page_feed)
+                cursor = getattr(timeline_page, 'cursor', None)
+                if not cursor or not page_feed:
+                    break
             interactions = 0
             posts_analyzed = 0
             high_relevance_posts = 0
@@ -1947,109 +2196,126 @@ class AutonomousBlueskyBotV2:
             
             # Получаем настройки взаимодействия
             engagement_settings = self.config.get('engagement_settings', {})
-            repost_threshold = engagement_settings.get('repost_threshold', 0.9)  # ИЗМЕНЕНО: Очень высокий порог (было 0.75) - практически отключает репосты
-            comment_threshold = engagement_settings.get('comment_threshold', 0.65)  # ИЗМЕНЕНО: Повышен порог для комментов (было 0.5)
-            repost_probability = engagement_settings.get('repost_probability', 0.02)  # ИЗМЕНЕНО: Минимальная вероятность (было 0.15) - 2%
-            comment_probability = engagement_settings.get('comment_probability', 0.2)  # ИЗМЕНЕНО: Снижена вероятность комментария (было 0.35)
-            max_reposts = engagement_settings.get('max_reposts_per_cycle', 0)  # ИЗМЕНЕНО: ПОЛНОСТЬЮ ОТКЛЮЧЕНЫ репосты (было 1)
-            max_comments = engagement_settings.get('max_comments_per_cycle', 2)  # ИЗМЕНЕНО: Максимум 2 комментария за цикл (было 4)
-            
-            logger.info(f"📰 Получено {len(timeline.feed)} постов для анализа")
-            if max_reposts == 0:
-                logger.info(f"🚫 Репосты ПОЛНОСТЬЮ ОТКЛЮЧЕНЫ (max_reposts=0)")
-            if BLUESKY_COMPLIANT_MODE and NO_AUTO_COMMENTS:
-                logger.info(f"🎯 Пороги: репост≥{repost_threshold} (комментарии отключены)")
-            else:
-                logger.info(f"🎯 Пороги: репост≥{repost_threshold}, комментарий≥{comment_threshold}")
-            
-            for post in timeline.feed:
-                if interactions >= self.max_interactions_per_cycle:
-                    break
-                
+            rel_settings = self.config.get('relevance_settings', {})
+            static_repost_threshold = engagement_settings.get('repost_threshold', 0.40)
+            comment_threshold = engagement_settings.get('comment_threshold', 0.65)
+            repost_probability = engagement_settings.get('repost_probability', 0.30)
+            comment_probability = engagement_settings.get('comment_probability', 0)
+            max_reposts = engagement_settings.get('max_reposts_per_cycle', 2)
+            max_comments = engagement_settings.get('max_comments_per_cycle', 0)
+            like_threshold = rel_settings.get('like_threshold', 0.20)
+
+            threshold_mode = engagement_settings.get('repost_threshold_mode', 'fixed')
+            quantile_p = engagement_settings.get('repost_quantile', 0.85)
+            min_threshold = engagement_settings.get('repost_min_threshold', 0.35)
+            fallback_min_posts = engagement_settings.get('repost_fallback_min_posts', 30)
+
+            logger.info(f"📰 Получено {len(feed_items)} постов для анализа (страниц: {max_pages}, limit/page: {page_limit})")
+
+            # --- Фаза 1: score по всем постам + собираем сигналы для Trend Radar ---
+            scored_posts = []
+            trend_snippets = []
+            my_did = getattr(self.bluesky_client.me, 'did', None) if hasattr(self.bluesky_client, 'me') and self.bluesky_client.me else None
+            for post in feed_items:
                 if not hasattr(post.post.record, 'text'):
                     continue
-                
-                text = post.post.record.text
-                author_handle = getattr(post.post.author, 'handle', 'unknown')
                 author_did = getattr(post.post.author, 'did', None)
-                
-                # Пропускаем свои посты или посты без автора (с защитой от AttributeError)
-                my_did = getattr(self.bluesky_client.me, 'did', None) if hasattr(self.bluesky_client, 'me') and self.bluesky_client.me else None
                 if not author_did or (my_did and author_did == my_did):
                     continue
-                
-                posts_analyzed += 1
-                
-                # Вычисляем релевантность
-                relevance_score = self.calculate_relevance(text.lower(), post)
-                
-                # Логируем анализ каждого поста
-                logger.info(f"🔍 Пост #{posts_analyzed} от @{author_handle}: score={relevance_score:.2f}")
-                logger.info(f"    Текст: {text[:100]}{'...' if len(text) > 100 else ''}")
-                
-                # Решаем, как взаимодействовать
-                if relevance_score > 0.25:  # ИЗМЕНЕНО: Повышен порог для лайка (было 0.15)
-                    high_relevance_posts += 1
-                    logger.info(f"🎯 Достаточная релевантность! Действуем...")
-                    
-                    try:
-                        # 1. Лайкаем релевантные посты (с защитой от дубликатов)
-                        if post.post.uri not in self.liked_posts:
-                            await self.bluesky_client.like(post.post.uri, post.post.cid)
-                            self.session_stats['likes_given'] += 1
-                            interactions += 1
-                            self.liked_posts.add(post.post.uri)  # НОВОЕ: запоминаем лайкнутый пост
-                            logger.info(f"❤️ Лайк поставлен!")
-                            
-                            # ДОБАВЛЕНО: Человеческая пауза после лайка
-                            await asyncio.sleep(random.uniform(5, 10))
-                        else:
-                            logger.info(f"❤️ Пост уже был лайкнут ранее, пропускаем")
-                        
-                        # 2. НОВОЕ: Репостим высококачественный контент (с лимитом и защитой от дубликатов)
-                        if (relevance_score >= repost_threshold and 
-                            reposts_made < max_reposts and 
+                text = post.post.record.text
+                trend_snippets.append(text[:200])
+                score = self.calculate_relevance(text.lower(), post)
+                scored_posts.append((post, text, author_did, score))
+            # Cache snippets for Trend Radar
+            self._trend_timeline_snippets = trend_snippets[:100]
+            posts_analyzed = len(scored_posts)
+
+            # --- Фаза 2: динамический порог ---
+            all_scores = [s for _, _, _, s in scored_posts]
+            if threshold_mode == 'dynamic_quantile' and len(all_scores) >= fallback_min_posts:
+                sorted_scores = sorted(all_scores)
+                idx = int(len(sorted_scores) * quantile_p)
+                idx = min(idx, len(sorted_scores) - 1)
+                repost_threshold = max(min_threshold, sorted_scores[idx])
+                logger.info(f"🎲 Динамический порог репоста: P{int(quantile_p*100)}={sorted_scores[idx]:.2f} -> threshold={repost_threshold:.2f} (min={min_threshold})")
+            else:
+                repost_threshold = static_repost_threshold
+                logger.info(f"🎯 Фиксированный порог репоста: {repost_threshold:.2f} (постов {len(all_scores)} < {fallback_min_posts} или mode=fixed)")
+
+            if max_reposts == 0:
+                logger.info("🚫 Репосты ПОЛНОСТЬЮ ОТКЛЮЧЕНЫ (max_reposts=0)")
+
+            score_dist = {'0.0-0.1': 0, '0.1-0.2': 0, '0.2-0.3': 0, '0.3-0.4': 0, '0.4-0.5': 0, '0.5+': 0}
+            for s in all_scores:
+                if s < 0.1: score_dist['0.0-0.1'] += 1
+                elif s < 0.2: score_dist['0.1-0.2'] += 1
+                elif s < 0.3: score_dist['0.2-0.3'] += 1
+                elif s < 0.3: score_dist['0.3-0.4'] += 1
+                elif s < 0.4: score_dist['0.3-0.4'] += 1
+                elif s < 0.5: score_dist['0.4-0.5'] += 1
+                else: score_dist['0.5+'] += 1
+            logger.info(f"📊 Распределение score: {score_dist}")
+
+            # --- Фаза 3: действия по отсортированным постам ---
+            scored_posts.sort(key=lambda x: x[3], reverse=True)
+
+            for post, text, author_did, relevance_score in scored_posts:
+                if interactions >= self.max_interactions_per_cycle:
+                    break
+
+                author_handle = getattr(post.post.author, 'handle', 'unknown')
+                logger.info(f"🔍 @{author_handle}: score={relevance_score:.2f} | {text[:80]}{'...' if len(text) > 80 else ''}")
+
+                if relevance_score < like_threshold:
+                    continue
+
+                high_relevance_posts += 1
+
+                try:
+                    liked = await self.engagement_service.like(
+                        uri=post.post.uri,
+                        cid=post.post.cid,
+                        score=relevance_score,
+                    )
+                    if liked:
+                        interactions += 1
+                        logger.info("❤️ Лайк поставлен!")
+                        await asyncio.sleep(random.uniform(3, 7))
+
+                    if (relevance_score >= repost_threshold and
+                            reposts_made < max_reposts and
                             random.random() < repost_probability and
-                            post.post.uri not in self.reposted_posts):  # НОВОЕ: проверка на уже репостнутые
-                            await self.bluesky_client.repost(post.post.uri, post.post.cid)
-                            self.session_stats['reposts_made'] += 1
-                            reposts_made += 1
-                            self.reposted_posts.add(post.post.uri)  # НОВОЕ: запоминаем репостнутый пост
-                            logger.info(f"🔄 Репост выполнен! (score: {relevance_score:.2f}, #{reposts_made}/{max_reposts})")
-                        elif post.post.uri in self.reposted_posts:
-                            logger.info(f"🔄 Пост уже был репостнут ранее, пропускаем")
-                        
-                        # 3. ОТКЛЮЧЕНО: Комментарии автоматические (соблюдение правил BlueSky)
-                        if BLUESKY_COMPLIANT_MODE and NO_AUTO_COMMENTS:
-                            # Полностью отключаем автоматические комментарии для соблюдения правил
-                            logger.info(f"🚫 Автоматические комментарии отключены (BlueSky compliance)")
-                        elif (relevance_score >= comment_threshold and 
-                            comments_made < max_comments and
-                            post.post.uri not in self.commented_posts):  # НОВОЕ: проверка на уже прокомментированные посты
-                            # Увеличиваем вероятность комментария для очень релевантных постов
-                            adaptive_comment_prob = min(comment_probability * (relevance_score / comment_threshold), 0.4)
-                            
-                            if random.random() < adaptive_comment_prob:
-                                comment = await self.generate_smart_comment(text)
-                                if comment and self._is_comment_unique(comment):  # НОВОЕ: проверка уникальности
-                                    await self.reply_to_post(post, comment)
-                                    comments_made += 1
-                                    self.commented_posts.add(post.post.uri)  # НОВОЕ: запоминаем пост
-                                    self._track_recent_comment(comment)  # НОВОЕ: отслеживаем комментарий
-                                    logger.info(f"💬 Комментарий отправлен! (score: {relevance_score:.2f}, #{comments_made}/{max_comments})")
-                                else:
-                                    logger.info(f"🔄 Комментарий пропущен: не уникальный или пустой")
-                        
-                        # Сохраняем информацию для обучения (только если есть author_did)
-                        if author_did:
-                            self.update_user_relationship(author_did, 'engagement', relevance_score)
-                        
-                    except Exception as e:
-                        logger.error(f"Ошибка взаимодействия: {e}")
-                    
-                    await asyncio.sleep(random.uniform(8, 15))  # ИЗМЕНЕНО: Увеличена пауза между анализом постов (было 2-5)
-                else:
-                    logger.info(f"    ⏭️ Релевантность слишком низкая ({relevance_score:.2f} < 0.25)")  # ИЗМЕНЕНО: обновлен порог в логе
+                            post.post.uri not in self.reposted_posts):
+                        post_created = None
+                        try:
+                            raw_ts = getattr(post.post.record, 'created_at', None)
+                            if raw_ts:
+                                post_created = datetime.fromisoformat(str(raw_ts).replace('Z', '+00:00')).replace(tzinfo=None)
+                        except Exception:
+                            pass
+                        policy_ok, policy_reason = self.repost_policy.check(
+                            text, author_did, post_created, self.recent_repost_authors)
+                        if policy_ok:
+                            reposted = await self.engagement_service.repost(
+                                uri=post.post.uri,
+                                cid=post.post.cid,
+                                score=relevance_score,
+                                author_did=author_did,
+                            )
+                            if reposted:
+                                reposts_made += 1
+                                logger.info(f"🔄 Репост выполнен! (score={relevance_score:.2f}, #{reposts_made}/{max_reposts})")
+                                await asyncio.sleep(random.uniform(5, 10))
+                        else:
+                            logger.info(f"🛡️ Репост заблокирован policy: {policy_reason}")
+
+                    if author_did:
+                        self.update_user_relationship(author_did, 'engagement', relevance_score)
+
+                except Exception as e:
+                    logger.error(f"Ошибка взаимодействия: {e}")
+
+                await asyncio.sleep(random.uniform(5, 12))
             
             # РАСШИРЕННАЯ статистика
             logger.info(f"📊 Итого проанализировано: {posts_analyzed} постов")
@@ -2080,94 +2346,73 @@ class AutonomousBlueskyBotV2:
             self.session_stats['errors'] += 1
     
     def calculate_relevance(self, text: str, post) -> float:
-        """Вычисление релевантности поста"""
-        score = 0.0
+        """Компонентный расчёт релевантности поста (topical + structure + engagement)."""
+        import math
+
+        rel = self.config.get('relevance_settings', {})
+        topic_groups = rel.get('topic_groups', {})
+        topical_max = rel.get('topical_max', 0.45)
+        kw_per_match = rel.get('keyword_per_match', 0.05)
+        hashtag_bonus_val = rel.get('hashtag_bonus', 0.08)
+        question_bonus_val = rel.get('question_bonus', 0.07)
+        length_range = rel.get('optimal_length_range', [80, 300])
+        length_bonus_val = rel.get('length_bonus', 0.05)
+        eng_log_base = rel.get('engagement_log_base', 10)
+        eng_max = rel.get('engagement_max', 0.25)
+
         text_lower = text.lower()
-        
-        # Расширенные ключевые слова на основе анализа популярных тем BlueSky
-        keywords = [
-            # ТОП-15 тем из анализа
-            'искусство', 'art', 'программирование', 'programming', 'философия', 'philosophy',
-            'культура', 'culture', 'природа', 'nature', 'технологии', 'tech', 'путешествия', 'travel',
-            'образование', 'education', 'юмор', 'humor', 'фотография', 'photography', 'книги', 'books',
-            'наука', 'science', 'дизайн', 'design', 'коты', 'cats',
-            
-            # Технические темы
-            'ai', 'ии', 'искусственный интеллект', 'машинное обучение', 'python', 'javascript',
-            'development', 'programming', 'инновации', 'стартап', 'startup', 'исследование', 'research',
-            'code', 'coding', 'developer', 'software', 'app', 'web', 'data', 'algorithm', 'framework',
-            'api', 'cloud', 'devops', 'machine learning', 'neural', 'database', 'backend', 'frontend',
-            
-            # Творчество и хобби
-            'музыка', 'music', 'кино', 'movies', 'игры', 'games', 'готовка', 'cooking',
-            'спорт', 'sport', 'фитнес', 'fitness', 'танцы', 'dance', 'мода', 'fashion',
-            'creative', 'create', 'creating', 'artist', 'artistic', 'paint', 'draw', 'write',
-            'writing', 'writer', 'photo', 'video', 'film', 'media', 'content', 'blog',
-            
-            # Социальные темы
-            'психология', 'psychology', 'отношения', 'relationships', 'семья', 'family',
-            'работа', 'work', 'карьера', 'career', 'бизнес', 'business', 'мотивация', 'motivation',
-            'community', 'social', 'people', 'human', 'society', 'culture', 'tradition',
-            'mental', 'emotional', 'feeling', 'experience', 'life', 'living', 'daily',
-            
-            # Повседневная жизнь
-            'здоровье', 'health', 'еда', 'food', 'дом', 'home', 'животные', 'animals',
-            'погода', 'weather', 'новости', 'news', 'экология', 'ecology',
-            'morning', 'evening', 'day', 'night', 'today', 'weekend', 'coffee', 'tea',
-            'dog', 'cat', 'pet', 'nature', 'environment', 'climate', 'green', 'sustainable',
-            
-            # Эмоциональные и вовлекающие
-            'любовь', 'love', 'дружба', 'friendship', 'счастье', 'happiness', 'грусть', 'sadness',
-            'радость', 'joy', 'вдохновение', 'inspiration', 'мечта', 'dream',
-            'amazing', 'awesome', 'great', 'good', 'beautiful', 'interesting', 'cool',
-            'wow', 'nice', 'best', 'favorite', 'like', 'enjoy', 'fun', 'happy',
-            
-            # Актуальные темы
-            'crypto', 'blockchain', 'nft', 'metaverse', 'remote', 'hybrid', 'productivity',
-            'mindfulness', 'meditation', 'workout', 'recipe', 'diy', 'hack', 'tip', 'advice',
-            'tutorial', 'guide', 'learn', 'study', 'skill', 'course', 'book', 'podcast',
-            'youtube', 'twitter', 'instagram', 'tiktok', 'social media', 'internet', 'online'
-        ]
-        
-        found_keywords = []
-        for keyword in keywords:
-            if keyword in text_lower:
-                score += 0.05  # Понижен с 0.1 до 0.05 для более широкого охвата
-                found_keywords.append(keyword)
-        
-        # Бонус за хештеги
-        hashtag_bonus = 0
-        if '#' in text:
-            hashtag_bonus = 0.1
-            score += hashtag_bonus
-        
-        # Бонус за вопросы (вовлечение)
-        question_bonus = 0
+        tokens = set(re.findall(r'\b[a-zA-Z\u0400-\u04FF]{2,}\b', text_lower))
+
+        # --- Topical score (token match by groups) ---
+        topical = 0.0
+        matched_groups = {}
+        for group_name, group_data in topic_groups.items():
+            kws = group_data.get('keywords', [])
+            weight = group_data.get('weight', kw_per_match)
+            hits = []
+            for kw in kws:
+                kw_parts = kw.lower().split()
+                if len(kw_parts) == 1:
+                    if kw_parts[0] in tokens:
+                        hits.append(kw)
+                else:
+                    if kw.lower() in text_lower:
+                        hits.append(kw)
+            if hits:
+                matched_groups[group_name] = hits
+                topical += weight * len(hits)
+        topical = min(topical, topical_max)
+
+        # --- Structure score ---
+        structure = 0.0
+        hashtag_count = text.count('#')
+        if hashtag_count > 0:
+            structure += hashtag_bonus_val
         if '?' in text:
-            question_bonus = 0.1
-            score += question_bonus
-        
-        # Учитываем вовлеченность поста
+            structure += question_bonus_val
+        text_len = len(text)
+        if len(length_range) >= 2 and length_range[0] <= text_len <= length_range[1]:
+            structure += length_bonus_val
+
+        # --- Engagement score (log curve) ---
         likes = getattr(post.post, 'like_count', 0) or 0
-        reposts = getattr(post.post, 'repost_count', 0) or 0
-        engagement = likes + reposts * 2
-        engagement_bonus = 0
-        if engagement > 20:
-            engagement_bonus = 0.15
-            score += engagement_bonus
-        elif engagement > 10:
-            engagement_bonus = 0.1
-            score += engagement_bonus
-        
-        # Детальное логирование расчета
-        logger.info(f"      📊 Детали расчета релевантности:")
-        logger.info(f"        Ключевые слова: {found_keywords} (+{len(found_keywords) * 0.05:.2f})")
-        logger.info(f"        Хештеги: {'+0.10' if hashtag_bonus else '0.00'}")
-        logger.info(f"        Вопросы: {'+0.10' if question_bonus else '0.00'}")
-        logger.info(f"        Вовлеченность: {likes} лайков + {reposts} репостов = {engagement} (+{engagement_bonus:.2f})")
-        logger.info(f"        Итоговый score: {min(score, 1.0):.2f}")
-        
-        return min(score, 1.0)
+        reposts_count = getattr(post.post, 'repost_count', 0) or 0
+        raw_engagement = likes + reposts_count * 2
+        if raw_engagement > 0 and eng_log_base > 1:
+            eng_score = min(math.log(1 + raw_engagement, eng_log_base) / math.log(1000, eng_log_base), 1.0) * eng_max
+        else:
+            eng_score = 0.0
+
+        final = min(topical + structure + eng_score, 1.0)
+
+        # --- Compact log ---
+        groups_str = ', '.join(f"{g}({len(h)})" for g, h in matched_groups.items()) if matched_groups else '-'
+        logger.info(
+            f"      📊 score={final:.2f}  topical={topical:.2f}[{groups_str}]  "
+            f"struct={structure:.2f}  engage={eng_score:.2f}({likes}L+{reposts_count}R={raw_engagement})"
+        )
+
+        return final
     
     async def reply_to_post(self, post, comment_text: str) -> None:
         """Ответ на пост с правильным форматированием и поддержкой упоминаний"""
@@ -2224,22 +2469,31 @@ class AutonomousBlueskyBotV2:
                 cycle_start = time.time()
                 # Обновляем heartbeat в начале каждого цикла
                 self._update_heartbeat()
+                self._consecutive_errors = 0  # Сброс circuit breaker при успешном старте цикла
                 logger.info(f"🔄 Цикл {cycle_count + 1} - {datetime.now()}")
                 
-                # Умное взаимодействие с контентом (каждый цикл для большей активности)
-                await self.smart_engagement()
+                # Engagement mode gate (orchestration-layer)
+                engagement_mode = self.config.get('engagement_mode', 'open')
+                run_engagement = engagement_mode != 'mention_only'
+
+                if run_engagement:
+                    await self.smart_engagement()
+                    if cycle_count % 5 == 0:
+                        await self.follow_strategy()
+                else:
+                    logger.info("🔇 Engagement пропущен (mode=mention_only)")
                 
-                # Стратегия подписок (еще реже)
-                if cycle_count % 5 == 0:  # Каждый пятый цикл
-                    await self.follow_strategy()
-                
-                # Генерация контента с контролем времени
+                # Генерация контента с контролем времени + smart scheduler
                 time_since_last_post = datetime.now() - last_post_time
                 min_interval = timedelta(minutes=self.post_interval[0])
+
+                in_posting_window = self._is_posting_window()
                 
-                if time_since_last_post >= min_interval:
+                if time_since_last_post >= min_interval and in_posting_window:
                     await self.create_scheduled_post()
                     last_post_time = datetime.now()
+                elif not in_posting_window:
+                    logger.info("🌙 Quiet hours / вне active window — постинг отложен")
                 else:
                     remaining = min_interval - time_since_last_post
                     logger.info(f"⏳ До следующего поста осталось: {remaining}")
@@ -2267,14 +2521,30 @@ class AutonomousBlueskyBotV2:
                     logger.info(f"📊 Постов за день: {self.daily_post_count}/{self.max_posts_per_day}")
                 
                 # Периодическая очистка старых данных (раз в день)
-                if cycle_count % 144 == 0:  # Примерно раз в 24 часа при цикле ~10мин
+                if cycle_count % 144 == 0 and cycle_count > 0:
                     self._cleanup_old_content_hashes()
-                    self._cleanup_old_commented_posts()  # Теперь очищает все взаимодействия
+                    self._cleanup_old_commented_posts()
+                    self.action_ledger.compact()
+                    removed_files, removed_bytes = _cleanup_log_budget(log_dir, LOG_TOTAL_BUDGET_BYTES)
+                    if removed_files:
+                        logger.warning(
+                            f"🧹 Очистка логов по бюджету: удалено {removed_files} файлов, "
+                            f"освобождено {removed_bytes / (1024 * 1024):.1f} MB"
+                        )
                 
-                # Диагностика RSS каждые 50 циклов (примерно раз в 8-10 часов)
+                # RSS rotation + daily report
                 if cycle_count % 50 == 0 and cycle_count > 0:
-                    logger.info("🔧 Запуск периодической диагностики RSS...")
-                    await self.test_rss_feeds_diagnostics()
+                    logger.info("🔧 RSS rotation...")
+                    self.rss_manager.rotate()
+                    self.rss_feeds = self.rss_manager.get_active_urls()
+                    logger.info(f"📡 Active RSS: {len(self.rss_feeds)}, probation: {len(self.rss_manager.get_probation_urls())}")
+
+                if cycle_count % 144 == 0 and cycle_count > 0:
+                    report = generate_daily_report(self.session_stats, self.memory, self.config)
+                    save_daily_report(report)
+                    self.memory.ab_results = self.ab_engine.results
+                    if self.dry_run and self.dry_run_log:
+                        self.dry_run_log.save()
                 
                 # Анализ разнообразия постов каждые 30 циклов (примерно раз в 5-6 часов)
                 if cycle_count % 30 == 0 and cycle_count > 0:
@@ -2291,6 +2561,14 @@ class AutonomousBlueskyBotV2:
                             logger.error("❌ Экстренное восстановление не удалось")
                             break
                 
+                # Refresh persisted session periodically (every 10 cycles ~ every 10-15h)
+                if cycle_count % 10 == 0 and cycle_count > 0:
+                    self._persist_session()
+
+                # Log activity budget status
+                budget_info = self.activity_budget.summary()
+                logger.info(f"💰 Budget: hourly {budget_info['hourly']}, daily {budget_info['daily']}")
+
                 # Логируем статистику Pollinations.AI
                 ai_stats = self.pollinations_ai.get_statistics()
                 if ai_stats['requests_made'] > 0:
@@ -2315,14 +2593,21 @@ class AutonomousBlueskyBotV2:
                 logger.info(f"⏸️ Пауза {next_run_minutes:.1f} минут до следующего цикла")
                 
             except Exception as e:
-                logger.error(f"❌ Ошибка в цикле бота: {e}")
                 self.session_stats['errors'] += 1
-                
-                # Попытка переподключения при ошибке
-                logger.info("🔄 Попытка переподключения через 5 минут...")
-                await asyncio.sleep(300)  # 5 минут вместо 1 минуты
-                
-                if not await self.authenticate():
+                self._consecutive_errors = getattr(self, '_consecutive_errors', 0) + 1
+                ec = classify_error(e)
+                self._cb_bluesky.record_failure()
+
+                if self._consecutive_errors >= 5:
+                    logger.error(f"🔴 Circuit breaker (main loop): {self._consecutive_errors} ошибок подряд ({ec.value}). Завершение.")
+                    break
+
+                delay = backoff_seconds(ec, self._consecutive_errors)
+                logger.warning(f"⚠️ {ec.value} error #{self._consecutive_errors}: {e}. Backoff {delay:.0f}s")
+                await asyncio.sleep(delay)
+
+                force = ec == ErrorClass.AUTH
+                if not await self.authenticate(force_login=force):
                     logger.error("❌ Не удалось переподключиться. Завершение работы.")
                     break
         
@@ -2338,25 +2623,32 @@ class AutonomousBlueskyBotV2:
     async def shutdown(self) -> None:
         """Корректное завершение работы бота"""
         logger.info("🛑 Завершение работы бота...")
-        
+
+        # Cancel all background tasks gracefully
+        if self._background_tasks:
+            logger.info(f"⏳ Отмена {len(self._background_tasks)} фоновых задач...")
+            for task in list(self._background_tasks):
+                task.cancel()
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+            self._background_tasks.clear()
+            logger.info("✅ Все фоновые задачи остановлены")
+
         try:
-            # НОВОЕ: Сохраняем множества защиты от дубликатов в память перед выходом
             if hasattr(self, 'commented_posts'):
                 self.memory.commented_posts_cache = self.commented_posts
             if hasattr(self, 'recent_comments'):
-                self.memory.recent_comments_cache = self.recent_comments[-20:]  # Последние 20
+                self.memory.recent_comments_cache = self.recent_comments[-20:]
             if hasattr(self, 'liked_posts'):
                 self.memory.liked_posts_cache = self.liked_posts
             if hasattr(self, 'reposted_posts'):
                 self.memory.reposted_posts_cache = self.reposted_posts
             if hasattr(self, 'followed_users'):
                 self.memory.followed_users_cache = self.followed_users
-        
-            # Сохраняем память
+
             self.memory.last_update = datetime.now()
             self.memory.save()
-            logger.info("💾 Финальное сохранение памяти (включая кэши защиты)")
-            
+            logger.info("💾 Финальное сохранение памяти (JSON, атомарная запись)")
+
         except Exception as e:
             logger.error(f"❌ Ошибка сохранения памяти при завершении: {e}")
         
@@ -2478,25 +2770,73 @@ class AutonomousBlueskyBotV2:
         self.memory.save()
     
     async def delayed_performance_check(self, post_uri: str, delay: int) -> None:
-        """Отложенная проверка эффективности поста"""
+        """Отложенная проверка эффективности поста + A/B ER tracking + audience memory."""
         await asyncio.sleep(delay)
-        
+
         try:
             performance = await self.analyze_post_performance(post_uri)
-            
-            # Обновляем память
+            er = performance.get('engagement_rate', 0)
+
             for post in self.memory.successful_posts:
                 if post.get('uri') == post_uri:
-                    post['engagement_rate'] = performance['engagement_rate']
+                    post['engagement_rate'] = er
                     post['final_stats'] = performance
-                    
-                    # Учимся на результатах
-                    if performance['engagement_rate'] > 10:
-                        logger.info(f"🎯 Успешный пост! Вовлеченность: {performance['engagement_rate']}")
+
+                    # A/B ER tracking
+                    ab_fmt = post.get('ab_format')
+                    if ab_fmt:
+                        if delay <= 3600:
+                            self.ab_engine.record_er(ab_fmt, er_1h=er)
+                        elif delay <= 21600:
+                            self.ab_engine.record_er(ab_fmt, er_6h=er)
+                        else:
+                            self.ab_engine.record_er(ab_fmt, er_24h=er)
+                        self.memory.ab_results = self.ab_engine.results
+                        logger.info(f"🔬 A/B ER записан: format={ab_fmt}, er={er:.3f} (delay={delay//3600}h)")
+
+                    # Audience memory: topic_outcomes
+                    topic = post.get('type', 'general')
+                    if topic not in self.memory.topic_outcomes:
+                        self.memory.topic_outcomes[topic] = {'total_er': 0.0, 'count': 0}
+                    self.memory.topic_outcomes[topic]['total_er'] += er
+                    self.memory.topic_outcomes[topic]['count'] += 1
+
+                    if er > 10:
+                        logger.info(f"🎯 Успешный пост! Вовлеченность: {er}")
+
+                    # Auto-update post_strategies weights on 24h check
+                    if delay > 21600 and self.memory.topic_outcomes:
+                        self._update_strategy_weights_from_memory()
                     break
-                    
+
         except Exception as e:
             logger.error(f"Ошибка анализа производительности: {e}")
+
+    def _update_strategy_weights_from_memory(self) -> None:
+        """Корректирует веса post_strategies по topic_outcomes (±10% от текущего, не выходя за [0.05,0.5])."""
+        try:
+            outcomes = self.memory.topic_outcomes
+            if not outcomes:
+                return
+            avg_all = sum(v['total_er'] / max(v['count'], 1) for v in outcomes.values()) / len(outcomes)
+            strategies_config = self.config.get('post_strategies', {})
+            changed = False
+            for fname, weight in list(strategies_config.items()):
+                topic_key = fname.lstrip('_create_').replace('quality_', '').replace('_post', '').replace('_', ' ').strip()
+                best_match = max(outcomes.keys(), key=lambda k: len(set(k.split()) & set(topic_key.split())), default=None)
+                if not best_match:
+                    continue
+                er_topic = outcomes[best_match]['total_er'] / max(outcomes[best_match]['count'], 1)
+                delta = 0.1 if er_topic > avg_all else -0.1
+                new_weight = round(max(0.05, min(0.50, weight * (1 + delta))), 3)
+                if new_weight != weight:
+                    strategies_config[fname] = new_weight
+                    changed = True
+            if changed:
+                self.config['post_strategies'] = strategies_config
+                logger.info(f"🔄 post_strategies обновлены по A/B данным: {strategies_config}")
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка обновления весов стратегий: {e}")
     
     async def maintain_rate_limits(self) -> None:
         """Управление rate limits"""
@@ -2651,23 +2991,24 @@ class AutonomousBlueskyBotV2:
                     should_follow = self.should_follow_user(profile)
                     logger.info(f"    Решение: {'✅ Подписаться' if should_follow else '❌ Пропустить'}")
                     
-                    if should_follow and profile.did not in self.followed_users:  # НОВОЕ: проверка на уже подписанных
+                    if should_follow and profile.did not in self.followed_users:
                         try:
-                            await self.bluesky_client.follow(profile.did)
-                            self.session_stats['follows_made'] += 1
-                            followed += 1
-                            self.followed_users.add(profile.did)  # НОВОЕ: запоминаем подписку
-                            logger.info(f"➕ Подписка на @{profile.handle} выполнена!")
-                            
-                            # Сохраняем в отношения с защитой от ошибок
+                            followed_ok = await self.engagement_service.follow(
+                                did=profile.did,
+                                handle=profile.handle,
+                                source='suggestions',
+                            )
+                            if followed_ok:
+                                logger.info(f"➕ Подписка на @{profile.handle} выполнена!")
+                                followed += 1
+
                             try:
                                 self.update_user_relationship(profile.did, 'follow', 5)
                             except Exception as rel_error:
                                 logger.warning(f"⚠️ Ошибка обновления отношений для @{profile.handle}: {rel_error}")
-                                # Не прерываем выполнение, подписка уже сделана
-                            
+
                             await asyncio.sleep(random.uniform(3, 7))
-                            
+
                         except Exception as e:
                             logger.error(f"Ошибка подписки на @{profile.handle}: {e}")
                     elif profile.did in self.followed_users:
@@ -2731,23 +3072,25 @@ class AutonomousBlueskyBotV2:
                     logger.info(f"    Подписчики: {followers}, Посты: {posts_count}")
                     
                     # Более мягкие критерии для авторов популярных постов + защита от дубликатов
-                    if (followers > 10 and followers < 50000 and posts_count > 5 and 
-                        post_engagement > 50 and full_profile.did not in self.followed_users):  # НОВОЕ: проверка
-                        
+                    if (followers > 10 and followers < 50000 and posts_count > 5 and
+                        post_engagement > 50 and
+                        full_profile.did not in self.followed_users):
+
                         try:
-                            await self.bluesky_client.follow(full_profile.did)
-                            self.session_stats['follows_made'] += 1
-                            followed += 1
-                            self.followed_users.add(full_profile.did)  # НОВОЕ: запоминаем подписку
-                            logger.info(f"➕ Подписка на автора популярного поста @{full_profile.handle}!")
-                            
-                            # Сохраняем в отношения с защитой от ошибок
+                            followed_ok = await self.engagement_service.follow(
+                                did=full_profile.did,
+                                handle=full_profile.handle,
+                                source='timeline',
+                            )
+                            if followed_ok:
+                                logger.info(f"➕ Подписка на автора популярного поста @{full_profile.handle}!")
+                                followed += 1
+
                             try:
-                                self.update_user_relationship(full_profile.did, 'follow', 7)  # Выше балл за популярность
+                                self.update_user_relationship(full_profile.did, 'follow', 7)
                             except Exception as rel_error:
                                 logger.warning(f"⚠️ Ошибка обновления отношений для @{full_profile.handle}: {rel_error}")
-                                # Не прерываем выполнение, подписка уже сделана
-                            
+
                             await asyncio.sleep(random.uniform(4, 8))
                             
                         except Exception as e:
@@ -2959,9 +3302,14 @@ class AutonomousBlueskyBotV2:
             return None
 
     async def generate_structured_post_content(self, prompt: str, model_key: str = 'creative') -> Optional[Dict[str, str]]:
+        """Генерирует структурированный пост (текст + хештеги) и возвращает dict.
+
+        Автоматически добавляет:
+        - A/B format suffix для текущего цикла генерации
+        - Усиленный промпт при повторной генерации после Quality Gate
         """
-        Генерирует структурированный пост (текст + хештеги) и возвращает dict.
-        """
+        prompt = self.content_service.build_structured_prompt(prompt)
+
         try:
             raw_response = await self.pollinations_ai.generate_content(prompt, model_key=model_key, json_output=True)
             if raw_response:
@@ -2973,7 +3321,7 @@ class AutonomousBlueskyBotV2:
             logger.error("❌ Ошибка декодирования JSON от AI. Ответ не был в формате JSON.")
         except Exception as e:
             logger.error(f"❌ Ошибка при генерации структурированного контента: {e}")
-        
+
         return None
 
     async def _create_post_with_image_generation(
@@ -2992,7 +3340,15 @@ class AutonomousBlueskyBotV2:
         if not structured_content:
             logger.warning(f"⚠️ Функция создания контента для '{content_type}' вернула пустой результат.")
             if fallback_func:
-                return await fallback_func()
+                fallback_content = await fallback_func()
+                if isinstance(fallback_content, dict):
+                    post_text = fallback_content.get('post_text', '')
+                    hashtags = fallback_content.get('hashtags', '')
+                    final_post_text = f"{post_text}\n\n{hashtags}".strip()
+                    return self.formatter.create_post(final_post_text, content_type=content_type)
+                if isinstance(fallback_content, str):
+                    return self.formatter.create_post(fallback_content, content_type=content_type)
+                return fallback_content
             return None
         
         post_text = structured_content.get('post_text', '')
@@ -3475,14 +3831,14 @@ class AutonomousBlueskyBotV2:
             return False
 
 async def main():
-    # Загружаем конфигурацию из переменных окружения
+    load_dotenv(override=False)
+
     config = {
         'handle': os.getenv('BLUESKY_HANDLE', 'your-bot.bsky.social'),
         'password': os.getenv('BLUESKY_PASSWORD', 'your-app-password'),
         'openai_api_key': os.getenv('OPENAI_API_KEY', 'your-openai-key')
     }
     
-    # Проверяем конфигурацию
     if 'your-' in config['handle'] or 'your-' in config['password']:
         logger.error("❌ Необходимо настроить учетные данные!")
         logger.info("Установите переменные окружения:")
@@ -3491,15 +3847,26 @@ async def main():
         logger.info("  OPENAI_API_KEY - ключ API OpenAI")
         return
     
-    # Создаем и запускаем улучшенного бота
-    bot = AutonomousBlueskyBotV2()
-    
+    instance_lock = SingleInstanceLock(
+        path=os.path.join(log_dir, 'bot.lock'),
+        stale_seconds=600,
+    )
     try:
-        await bot.run_bot_cycle()
-    except KeyboardInterrupt:
-        logger.info("⌨️ Получен сигнал остановки")
+        instance_lock.acquire()
+    except RuntimeError as e:
+        logger.error(f"❌ {e}")
+        return
+
+    try:
+        bot = AutonomousBlueskyBotV2()
+        try:
+            await bot.run_bot_cycle()
+        except KeyboardInterrupt:
+            logger.info("⌨️ Получен сигнал остановки")
+        finally:
+            await bot.shutdown()
     finally:
-        await bot.shutdown()
+        instance_lock.release()
 
 
 if __name__ == "__main__":

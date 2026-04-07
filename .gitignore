@@ -121,10 +121,17 @@ dmypy.json
 # Bot specific files
 bot.log
 bot_memory.pkl
+bot_memory.json
 bot_heartbeat.txt
 monitor.log
 server-memory/
 serverMemory/
+rss_source_state.json
+action_ledger.jsonl
+dry_run_report.json
+reports/
+session.json
+bot.lock
 
 # Temporary files
 *.tmp
@@ -135,6 +142,7 @@ serverMemory/
 # IDE files
 .vscode/
 .idea/
+.cursor/
 *.sublime-project
 *.sublime-workspace
 

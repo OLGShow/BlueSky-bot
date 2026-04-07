@@ -1,0 +1,29 @@
+#!/bin/bash
+set -e
+
+BOT_DIR="/opt/bluesky-bot"
+CONF_DIR="/etc/bluesky-bot"
+DATA_DIR="/var/lib/bluesky-bot"
+UNIT_FILE="/etc/systemd/system/bluesky-bot.service"
+
+case "${1:-}" in
+  remove)
+    # keep configs/data on plain remove
+    systemctl daemon-reload || true
+    ;;
+  purge)
+    # full cleanup on purge
+    systemctl disable bluesky-bot.service >/dev/null 2>&1 || true
+    systemctl stop bluesky-bot.service >/dev/null 2>&1 || true
+    rm -f "$UNIT_FILE"
+    rm -rf "$BOT_DIR" "$CONF_DIR" "$DATA_DIR"
+
+    if id -u bluesky-bot >/dev/null 2>&1; then
+      userdel bluesky-bot >/dev/null 2>&1 || true
+    fi
+
+    systemctl daemon-reload || true
+    ;;
+esac
+
+exit 0

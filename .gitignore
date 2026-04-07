@@ -132,6 +132,8 @@ dry_run_report.json
 reports/
 session.json
 bot.lock
+packaging/dist/
+packaging/_stage/
 
 # Temporary files
 *.tmp

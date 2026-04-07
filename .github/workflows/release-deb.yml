@@ -1,0 +1,110 @@
+name: Build .deb and publish APT repo
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Package version override (e.g. 3.1.1)"
+        required: false
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  build-deb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: ver
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          elif [ -n "${{ github.event.release.tag_name }}" ]; then
+            V="${{ github.event.release.tag_name }}"
+            echo "version=${V#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=$(grep '^Version:' packaging/deb/control | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build .deb package
+        run: bash packaging/build-deb.sh "${{ steps.ver.outputs.version }}"
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-package
+          path: packaging/dist/*.deb
+
+      - name: Attach .deb to GitHub Release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.event.release.tag_name }}" packaging/dist/*.deb --clobber
+
+  publish-apt-repo:
+    needs: build-deb
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          fetch-depth: 0
+        continue-on-error: true
+
+      - name: Prepare repo directory
+        run: |
+          mkdir -p apt/pool apt/dists/stable/main/binary-all
+
+      - name: Download .deb artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: deb-package
+          path: apt/pool/
+
+      - name: Generate APT index
+        run: |
+          cd apt
+          dpkg-scanpackages pool /dev/null > dists/stable/main/binary-all/Packages
+          gzip -k dists/stable/main/binary-all/Packages
+
+          cat > dists/stable/Release << EOF
+          Origin: OLGShow
+          Label: BlueSky Bot APT Repository
+          Suite: stable
+          Codename: stable
+          Architectures: all
+          Components: main
+          Description: BlueSky Bot packages for Ubuntu
+          EOF
+
+          apt-ftparchive release dists/stable >> dists/stable/Release 2>/dev/null || true
+
+      - name: Create index page
+        run: |
+          cat > apt/index.html << 'HTML'
+          <!DOCTYPE html>
+          <html><head><title>BlueSky Bot APT Repo</title></head>
+          <body>
+          <h1>BlueSky Bot APT Repository</h1>
+          <p>Add this repo:</p>
+          <pre>
+          echo "deb [trusted=yes] https://olgshow.github.io/BlueSky-bot/apt stable main" | sudo tee /etc/apt/sources.list.d/bluesky-bot.list
+          sudo apt update
+          sudo apt install bluesky-bot
+          </pre>
+          </body></html>
+          HTML
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./apt
+          destination_dir: apt
+          keep_files: true

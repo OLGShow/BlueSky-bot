@@ -74,7 +74,98 @@
 
 ---
 
-## 🚀 Быстрая установка (Ubuntu Server 24.04.2)
+## 🚀 Установка через APT (рекомендуемый способ для Ubuntu 24.04+)
+
+### 1. Подключите репозиторий и установите:
+
+```bash
+echo "deb [trusted=yes] https://olgshow.github.io/BlueSky-bot/apt stable main" \
+  | sudo tee /etc/apt/sources.list.d/bluesky-bot.list
+sudo apt update
+sudo apt install bluesky-bot
+```
+
+### 2. Настройте конфигурацию:
+
+```bash
+sudo nano /etc/bluesky-bot/.env
+```
+
+### 3. Перезапустите:
+
+```bash
+sudo systemctl restart bluesky-bot
+```
+
+### Обновление бота:
+
+```bash
+sudo apt update && sudo apt upgrade
+```
+
+или точечно:
+
+```bash
+sudo apt install --only-upgrade bluesky-bot
+```
+
+### Откат на предыдущую версию:
+
+```bash
+sudo apt install bluesky-bot=3.1.0
+```
+
+(замените `3.1.0` на нужную версию из `apt list -a bluesky-bot`)
+
+### Проверки после обновления:
+
+```bash
+sudo systemctl status bluesky-bot
+journalctl -u bluesky-bot --since "5 min ago" --no-pager
+```
+
+### Проверка установки с сервера (чек-лист)
+
+```bash
+# 1) пакет установлен
+dpkg -l | grep bluesky-bot
+
+# 2) сервис активен
+systemctl is-enabled bluesky-bot
+systemctl is-active bluesky-bot
+
+# 3) unit и рабочие пути на месте
+ls -la /etc/systemd/system/bluesky-bot.service
+ls -la /opt/bluesky-bot
+ls -la /etc/bluesky-bot
+ls -la /var/lib/bluesky-bot
+```
+
+### Полное удаление проекта с сервера
+
+```bash
+# Полная деинсталляция пакета + очистка данных/конфигов (postrm purge)
+sudo apt purge -y bluesky-bot
+sudo apt autoremove -y
+
+# Удалить apt source (если больше не нужен)
+sudo rm -f /etc/apt/sources.list.d/bluesky-bot.list
+sudo apt update
+```
+
+Проверка, что проект удален:
+
+```bash
+dpkg -l | grep bluesky-bot || echo "package removed"
+test -d /opt/bluesky-bot || echo "/opt removed"
+test -d /etc/bluesky-bot || echo "/etc removed"
+test -d /var/lib/bluesky-bot || echo "/var/lib removed"
+systemctl status bluesky-bot 2>/dev/null || echo "service removed"
+```
+
+---
+
+## 🚀 Альтернативная установка (скрипт, без APT)
 
 ### Автоматическая установка одной командой:
 
@@ -96,19 +187,24 @@ curl -sSL https://raw.githubusercontent.com/OLGShow/BlueSky-Bot/main/install.sh 
 ### После установки:
 
 1. **Настройте конфигурацию:**
-  ```bash
-   cd ~/BlueSky-Bot
-   nano .env
-  ```
+
+```bash
+cd ~/BlueSky-Bot
+nano .env
+```
+
 2. **Введите ваши данные BlueSky:**
-  ```bash
-   BLUESKY_HANDLE=ваш-бот.bsky.social
-   BLUESKY_PASSWORD=ваш-пароль-приложения
-  ```
+
+```bash
+BLUESKY_HANDLE=ваш-бот.bsky.social
+BLUESKY_PASSWORD=ваш-пароль-приложения
+```
+
 3. **Запустите бота:**
-  ```bash
-   bot-start
-  ```
+
+```bash
+bot-start
+```
 
 ---
 
@@ -492,7 +588,7 @@ sudo systemctl restart networking
 - `.env` - Переменные окружения и секреты
 - `bot_config.json` - Настройки стратегий, лимитов, engagement mode и scheduling
 - `requirements.txt` - Python зависимости
-- `systemd/bluesky-bot.service` - Конфигурация systemd сервиса
+- `systemd/bluesky-bot.service` - Конфигурация systemd сервиса (dev-версия)
 
 ### Данные и логи:
 
@@ -503,6 +599,17 @@ sudo systemctl restart networking
 - `bot.lock` - PID lock-файл для защиты от дубликатов
 - `bot_heartbeat.txt` - Файл heartbeat для мониторинга
 - `monitor.log` - Логи внешнего мониторинга
+
+### Пути при установке через APT (.deb):
+
+| Что | Путь |
+|---|---|
+| Код бота | `/opt/bluesky-bot/` |
+| Конфиг (.env, bot_config.json) | `/etc/bluesky-bot/` |
+| State-данные (memory, ledger, session) | `/var/lib/bluesky-bot/` |
+| systemd unit | `/etc/systemd/system/bluesky-bot.service` |
+| venv | `/opt/bluesky-bot/venv/` |
+| Пользователь | `bluesky-bot` (системный) |
 
 ---
 

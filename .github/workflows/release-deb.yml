@@ -59,7 +59,7 @@ jobs:
 
       - name: Prepare repo directory
         run: |
-          mkdir -p apt/pool apt/dists/stable/main/binary-all
+          mkdir -p apt/pool apt/dists/stable/main/binary-all apt/dists/stable/main/binary-amd64
 
       - name: Download .deb artifact
         uses: actions/download-artifact@v4
@@ -70,7 +70,9 @@ jobs:
       - name: Generate APT index
         run: |
           cd apt
-          dpkg-scanpackages pool /dev/null > dists/stable/main/binary-all/Packages
+          dpkg-scanpackages pool /dev/null > dists/stable/main/binary-amd64/Packages
+          cp dists/stable/main/binary-amd64/Packages dists/stable/main/binary-all/Packages
+          gzip -kf dists/stable/main/binary-amd64/Packages
           gzip -k dists/stable/main/binary-all/Packages
 
           cat > dists/stable/Release << EOF
@@ -78,7 +80,7 @@ jobs:
           Label: BlueSky Bot APT Repository
           Suite: stable
           Codename: stable
-          Architectures: all
+          Architectures: amd64 all
           Components: main
           Description: BlueSky Bot packages for Ubuntu
           EOF

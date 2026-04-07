@@ -86,7 +86,7 @@ jobs:
           dpkg-scanpackages pool /dev/null > dists/stable/main/binary-amd64/Packages
           cp dists/stable/main/binary-amd64/Packages dists/stable/main/binary-all/Packages
           gzip -kf dists/stable/main/binary-amd64/Packages
-          gzip -k dists/stable/main/binary-all/Packages
+          gzip -kf dists/stable/main/binary-all/Packages
 
           cat > dists/stable/Release << EOF
           Origin: OLGShow

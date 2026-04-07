@@ -6,8 +6,11 @@ on:
     paths:
       - ".github/workflows/release-deb.yml"
       - "packaging/**"
+      - "*.py"
       - "requirements.txt"
       - "bluesky_bot_v2.py"
+      - "state_service.py"
+      - "install.sh"
       - "README.md"
   release:
     types: [published]

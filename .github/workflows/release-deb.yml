@@ -1,6 +1,14 @@
 name: Build .deb and publish APT repo
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/release-deb.yml"
+      - "packaging/**"
+      - "requirements.txt"
+      - "bluesky_bot_v2.py"
+      - "README.md"
   release:
     types: [published]
   workflow_dispatch:
@@ -28,6 +36,8 @@ jobs:
           elif [ -n "${{ github.event.release.tag_name }}" ]; then
             V="${{ github.event.release.tag_name }}"
             echo "version=${V#v}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            echo "version=3.1.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
           else
             echo "version=$(grep '^Version:' packaging/deb/control | awk '{print $2}')" >> "$GITHUB_OUTPUT"
           fi

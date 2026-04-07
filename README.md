@@ -113,6 +113,8 @@ sudo apt update && sudo apt upgrade
 sudo apt install --only-upgrade bluesky-bot
 ```
 
+CI/CD примечание: APT-пакет собирается и публикуется автоматически при `push` в `main` (для файлов, влияющих на пакет). Для push-сборок версия пакета вычисляется как `3.1.<github_run_number>`.
+
 ### Откат на предыдущую версию:
 
 ```bash

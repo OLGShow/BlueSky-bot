@@ -1,0 +1,56 @@
+#!/bin/bash
+set -e
+
+BOT_DIR="/opt/bluesky-bot"
+CONF_DIR="/etc/bluesky-bot"
+DATA_DIR="/var/lib/bluesky-bot"
+VENV_DIR="${BOT_DIR}/venv"
+
+# Create system user if missing
+if ! id -u bluesky-bot >/dev/null 2>&1; then
+    useradd --system --home-dir "$BOT_DIR" --shell /usr/sbin/nologin bluesky-bot
+fi
+
+# Ensure data directory for state files
+mkdir -p "$CONF_DIR"
+mkdir -p "$DATA_DIR"
+chown bluesky-bot:bluesky-bot "$CONF_DIR"
+chown bluesky-bot:bluesky-bot "$DATA_DIR"
+
+# Seed default config if this is the first install
+if [ ! -f "${CONF_DIR}/.env" ]; then
+    cp "${BOT_DIR}/env.example" "${CONF_DIR}/.env"
+    chmod 600 "${CONF_DIR}/.env"
+    chown bluesky-bot:bluesky-bot "${CONF_DIR}/.env"
+    echo "bluesky-bot: default .env created at ${CONF_DIR}/.env — edit it before starting"
+fi
+
+if [ ! -f "${CONF_DIR}/bot_config.json" ]; then
+    cp "${BOT_DIR}/bot_config.json" "${CONF_DIR}/bot_config.json"
+    chown bluesky-bot:bluesky-bot "${CONF_DIR}/bot_config.json"
+fi
+
+# Create/update virtualenv and install dependencies
+python3 -m venv "$VENV_DIR"
+"${VENV_DIR}/bin/pip" install --upgrade pip >/dev/null
+"${VENV_DIR}/bin/pip" install -r "${BOT_DIR}/requirements.txt" >/dev/null
+
+# Symlink config into working directory so the bot finds them
+ln -sf "${CONF_DIR}/.env" "${BOT_DIR}/.env"
+ln -sf "${CONF_DIR}/bot_config.json" "${BOT_DIR}/bot_config.json"
+
+# Symlink state files into data dir
+for f in bot_memory.json action_ledger.jsonl session.json bot.lock bot_heartbeat.txt; do
+    target="${DATA_DIR}/${f}"
+    link="${BOT_DIR}/${f}"
+    [ -f "$target" ] || touch "$target"
+    chown bluesky-bot:bluesky-bot "$target"
+    ln -sf "$target" "$link"
+done
+
+# Enable and restart the service
+systemctl daemon-reload
+systemctl enable bluesky-bot.service
+systemctl restart bluesky-bot.service
+
+echo "bluesky-bot: installed and started"

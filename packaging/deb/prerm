@@ -1,0 +1,7 @@
+#!/bin/bash
+set -e
+
+if systemctl is-active --quiet bluesky-bot.service 2>/dev/null; then
+    systemctl stop bluesky-bot.service
+    echo "bluesky-bot: service stopped"
+fi

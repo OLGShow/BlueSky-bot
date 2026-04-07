@@ -3323,10 +3323,46 @@ class AutonomousBlueskyBotV2:
         try:
             raw_response = await self.pollinations_ai.generate_content(prompt, model_key=model_key, json_output=True)
             if raw_response:
-                data = json.loads(raw_response)
-                if 'post_text' in data and 'hashtags' in data:
+                data = None
+                try:
+                    data = json.loads(raw_response)
+                except json.JSONDecodeError:
+                    # Be tolerant to wrappers like markdown fences or leading text.
+                    m = re.search(r"\{[\s\S]*\}", raw_response)
+                    if m:
+                        data = json.loads(m.group(0))
+                    else:
+                        raise
+
+                if isinstance(data, dict) and 'post_text' in data and 'hashtags' in data:
+                    post_text = str(data.get('post_text', '')).strip()
+                    hashtags = str(data.get('hashtags', '')).strip()
+
+                    if not post_text:
+                        return None
+
+                    # Normalize hashtags so they remain parseable and consistent.
+                    tags = []
+                    for token in re.split(r"[,\s]+", hashtags.replace("\n", " ").strip()):
+                        t = token.strip()
+                        if not t:
+                            continue
+                        if not t.startswith('#'):
+                            t = f"#{t}"
+                        t = re.sub(r"[^#A-Za-z0-9_]", "", t)
+                        if len(t) > 1:
+                            tags.append(t)
+                    # Keep only 2-4 tags to reduce spamminess.
+                    tags = list(dict.fromkeys(tags))[:4]
+                    if len(tags) < 2:
+                        tags = ['#tech', '#insight']
+
+                    normalized = {
+                        'post_text': post_text,
+                        'hashtags': ' '.join(tags)
+                    }
                     logger.info("✅ AI сгенерировал структурированный пост (текст + хештеги)")
-                    return data
+                    return normalized
         except json.JSONDecodeError:
             logger.error("❌ Ошибка декодирования JSON от AI. Ответ не был в формате JSON.")
         except Exception as e:

@@ -35,6 +35,14 @@ BLUESKY_HANDLE=your-bot.bsky.social
 BLUESKY_PASSWORD=your-app-password
 ```
 
+### Быстрая проверка после установки
+
+```bash
+systemctl status bluesky-bot --no-pager
+journalctl -u bluesky-bot --since "10 min ago" --no-pager
+sudo grep -E "^(BLUESKY_HANDLE|BLUESKY_PASSWORD)=" /etc/bluesky-bot/.env
+```
+
 ## Актуальные команды
 
 ### Статус и логи

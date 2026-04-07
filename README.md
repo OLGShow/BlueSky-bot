@@ -85,6 +85,12 @@ sudo apt update
 sudo apt install bluesky-bot
 ```
 
+Быстрый инсталлятор тоже теперь APT-first:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/OLGShow/BlueSky-bot/main/install.sh | bash
+```
+
 ### 2. Настройте конфигурацию:
 
 ```bash

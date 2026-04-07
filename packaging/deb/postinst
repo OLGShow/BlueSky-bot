@@ -51,6 +51,11 @@ done
 # Enable and restart the service
 systemctl daemon-reload
 systemctl enable bluesky-bot.service
-systemctl restart bluesky-bot.service
-
-echo "bluesky-bot: installed and started"
+if grep -q "your-bot.bsky.social" "${CONF_DIR}/.env" || grep -q "your-app-password" "${CONF_DIR}/.env"; then
+    echo "bluesky-bot: .env contains placeholder credentials."
+    echo "bluesky-bot: service enabled but NOT started. Configure /etc/bluesky-bot/.env and run:"
+    echo "  sudo systemctl restart bluesky-bot"
+else
+    systemctl restart bluesky-bot.service
+    echo "bluesky-bot: installed and started"
+fi

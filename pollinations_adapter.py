@@ -32,7 +32,8 @@ class PollinationsAI:
         'smart': 'claude-hybridspace',  # Claude - аналитика
         'coder': 'qwen-coder',         # Для программирования
         'reasoning': 'deepseek-r1',     # С рассуждениями
-        'fast': 'gemini',              # Быстрые ответы
+        # Pollinations legacy API returns 404 for "gemini" — use same stable text model as creative.
+        'fast': 'openai',              # Быстрые ответы (JSON-ретраи, комментарии)
         'search': 'searchgpt',         # С поиском в реальном времени
         'multilingual': 'llama',        # Многоязычная модель
         'dall-e-3': 'dall-e-3'          # DALL-E 3 для генерации изображений

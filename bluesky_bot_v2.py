@@ -965,10 +965,14 @@ class AutonomousBlueskyBotV2:
             while post and hasattr(post, 'text') and post.text:
                 gate_ok, gate_reason = self.quality_gate.check(post.text, recent_texts)
                 if gate_ok:
-                    logger.info(f"✅ Quality Gate пройден (попытка {regen_count + 1})")
+                    logger.info(
+                        f"✅ Предпроверка контента пройдена (сигнал/шум, без дубликатов) — попытка {regen_count + 1}"
+                    )
                     break
                 regen_count += 1
-                logger.warning(f"⚠️ Quality Gate не пройден: {gate_reason} (попытка {regen_count}/{max_regen})")
+                logger.warning(
+                    f"⚠️ Предпроверка контента не пройдена: {gate_reason} (попытка {regen_count}/{max_regen})"
+                )
                 if regen_count > max_regen:
                     post = None
                     break
@@ -1054,7 +1058,10 @@ class AutonomousBlueskyBotV2:
                 self.content_service.schedule_post_performance_checks(created.uri)
                 
             else:
-                logger.warning("⚠️ Пост не прошел проверку качества. Пропускаем публикацию.")
+                logger.warning(
+                    "⚠️ Пост не прошёл финальную оценку вирусности/порогов (viral/combined/triggers). "
+                    "Публикация отменена."
+                )
                 
         except Exception as e:
             logger.error(f"❌ Ошибка создания поста: {e}")
@@ -1126,8 +1133,8 @@ class AutonomousBlueskyBotV2:
         post.viral_score = viral_score
         post.viral_factors = factors
         
-        # Детальное логирование
-        logger.info(f"📊 АНАЛИЗ КАЧЕСТВА ПОСТА:")
+        # Детальное логирование (этап 2: пороги viral/combined/triggers; не путать с предпроверкой контента)
+        logger.info(f"📊 Финальная оценка перед публикацией (вирусность + пороги):")
         logger.info(f"   🎯 Вирусный потенциал: {viral_score:.2f}/1.0")
         logger.info(f"   📈 Базовая оценка: {basic_score:.2f}/1.0")
         logger.info(f"   🔥 Итоговая оценка: {combined_score:.2f}/1.0")
@@ -1152,7 +1159,10 @@ class AutonomousBlueskyBotV2:
         passed = meets_viral_threshold and meets_basic_threshold and has_enough_triggers
         
         if not passed:
-            logger.warning(f"⚠️ Пост не прошел проверку качества (viral: {viral_score:.2f}, combined: {combined_score:.2f}, triggers: {len(factors)})")
+            logger.warning(
+                f"⚠️ Финальная оценка: пороги не выполнены (viral: {viral_score:.2f}, "
+                f"combined: {combined_score:.2f}, triggers: {len(factors)})"
+            )
         
         return passed
     
@@ -2320,7 +2330,9 @@ class AutonomousBlueskyBotV2:
             # РАСШИРЕННАЯ статистика
             logger.info(f"📊 Итого проанализировано: {posts_analyzed} постов")
             logger.info(f"🎯 Высокая релевантность: {high_relevance_posts} постов")
-            logger.info(f"❤️ Лайков поставлено: {self.session_stats['likes_given']}")
+            logger.info(
+                f"❤️ Лайков поставлено (этот цикл): {interactions} | всего за сессию: {self.session_stats['likes_given']}"
+            )
             logger.info(f"🔄 Репостов сделано: {reposts_made}")
             if BLUESKY_COMPLIANT_MODE and NO_AUTO_COMMENTS:
                 logger.info(f"💬 Комментарии: ОТКЛЮЧЕНЫ (BlueSky compliance)")
@@ -2330,13 +2342,14 @@ class AutonomousBlueskyBotV2:
             # Детальная статистика эффективности
             if posts_analyzed > 0:
                 relevance_rate = (high_relevance_posts / posts_analyzed) * 100
-                engagement_rate = (interactions / posts_analyzed) * 100 if interactions > 0 else 0
-                repost_rate = (reposts_made / posts_analyzed) * 100 if reposts_made > 0 else 0
-                comment_rate = (comments_made / posts_analyzed) * 100 if comments_made > 0 else 0
+                # Доля от всех просканированных постов в ленте (тот же знаменатель, что и «Итого проанализировано»).
+                like_rate = (interactions / posts_analyzed) * 100
+                repost_rate = (reposts_made / posts_analyzed) * 100
+                comment_rate = (comments_made / posts_analyzed) * 100
                 
                 logger.info(f"📈 Показатели эффективности:")
                 logger.info(f"   📊 Процент релевантных постов: {relevance_rate:.1f}%")
-                logger.info(f"   ❤️ Процент лайков: {engagement_rate:.1f}%")
+                logger.info(f"   ❤️ Процент лайков: {like_rate:.1f}%")
                 logger.info(f"   🔄 Процент репостов: {repost_rate:.1f}%")
                 logger.info(f"   💬 Процент комментариев: {comment_rate:.1f}%")
                 logger.info(f"   🎯 Конверсия релевантности: {(interactions/high_relevance_posts*100):.1f}%" if high_relevance_posts > 0 else "   🎯 Конверсия релевантности: 0%")

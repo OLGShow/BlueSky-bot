@@ -1,0 +1,14 @@
+[config]
+model = "openai/gpt-4o-mini"
+fallback_models = ["openai/gpt-4o-mini"]
+git_provider = "github"
+
+[pr_reviewer]
+require_score_review = true
+require_tests_review = true
+require_security_review = true
+require_estimate_effort_to_review = true
+num_max_findings = 8
+
+[pr_code_suggestions]
+num_code_suggestions_per_chunk = 4

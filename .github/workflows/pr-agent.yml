@@ -1,0 +1,50 @@
+# PR-Agent: AI code review on every pull request
+# Docs: https://github.com/The-PR-Agent/pr-agent
+#       https://docs.pr-agent.ai/installation/github/
+#
+# Action ownership: community org The-PR-Agent (formerly qodo-ai/pr-agent).
+# Pin: Docker Hub release tag below. Do NOT use the-pr-agent/pr-agent@main —
+# that wrapper's Dockerfile is `FROM pragent/pr-agent:github_action` (floating).
+name: PR Agent
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  review:
+    if: >
+      github.event.sender.type != 'Bot' &&
+      (github.event_name == 'pull_request' ||
+       (github.event_name == 'issue_comment' &&
+        contains(github.event.comment.body, '/review')))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require OpenRouter API key
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          if [ -z "$OPENROUTER_API_KEY" ]; then
+            echo "::error::Secret OPENROUTER_API_KEY is not set. Add it in GitHub → Settings → Secrets and variables → Actions (never commit the key)."
+            exit 1
+          fi
+
+      - name: PR Agent review
+        uses: docker://pragent/pr-agent:0.48.0-github_action
+        env:
+          # OpenRouter bridge: repo secret → OpenAI-compatible client
+          OPENAI_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENAI.API_BASE: https://openrouter.ai/api/v1
+          OPENAI.API_TYPE: openai
+          config.model: ${{ vars.PR_AGENT_MODEL || 'openai/gpt-4o-mini' }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          github_action: "true"
+          github_action_config.auto_review: "true"
+          github_action_config.auto_improve: "true"

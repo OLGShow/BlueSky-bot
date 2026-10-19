@@ -50,6 +50,7 @@ PYFILES=(
     post_strategies.py
     http_session.py
     log_sanitizer.py
+    learning_orchestrator.py
     llm_retro.py
     safety_governor.py
     openrouter_adapter.py

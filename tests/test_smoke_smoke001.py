@@ -55,6 +55,7 @@ KEY_MODULES: Sequence[str] = (
     "policy_learner",
     "engagement_learner",
     "agent_decision_log",
+    "learning_orchestrator",
     "rss_source_manager",
 )
 

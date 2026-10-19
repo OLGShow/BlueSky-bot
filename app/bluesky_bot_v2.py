@@ -34,13 +34,9 @@ from policy_learner import (
     recent_format_keys_24h,
     recent_strategy_keys_24h,
 )
-from follower_tracker import FollowerTracker, delta_between
-from engagement_learner import (
-    EngagementLearner,
-    eligible_engagement_catch_up_checks,
-)
-from agent_decision_log import AgentDecisionLog
-from llm_retro import LlmRetro
+from follower_tracker import delta_between
+from engagement_learner import eligible_engagement_catch_up_checks
+from learning_orchestrator import LearningOrchestrator
 
 # Новые импорты для форматирования
 from bluesky_post_formatter import BlueskyPostFormatter, PostTemplates, RichTextPost
@@ -70,7 +66,7 @@ from resilience_service import (
     OutboundRetryPolicies,
     build_outbound_retry_policies,
 )
-from safety_governor import SafetyGovernor, SafetyStatus
+from safety_governor import SafetyStatus
 from log_sanitizer import SanitizingFilter
 from engagement_ports import (
     DryRunGate,
@@ -593,11 +589,6 @@ class AutonomousBlueskyBotV2:
             action_costs=budget_cfg.get('action_costs'),
         )
 
-        # Safety governor (PLRN-022): pause credit/sync/publish on risk signals
-        self.safety_governor = SafetyGovernor(
-            self.config.get('safety_governor', {})
-        )
-
         # Growth Engine
         self.dry_run = os.getenv('DRY_RUN', 'false').lower() in ('true', '1', 'yes')
         self.dry_run_log = DryRunAction() if self.dry_run else None
@@ -692,59 +683,27 @@ class AutonomousBlueskyBotV2:
         )
         # Hybrid registry: extracted strategies + bound methods for the rest.
         self.post_strategy_registry = self._build_post_strategy_registry()
-        # PolicyLearner (PLRN-005): Thompson bandit over strategy arms
-        lp = self.config.get('learning_parameters', {}) or {}
-        state_path = lp.get('state_path', 'learning_state.json')
-        arms = list(self.config.get('post_strategies', {}).keys())
-        boot = dict(self.config.get('post_strategies', {}))
-        self._config_path = getattr(self, '_config_path', None) or 'bot_config.json'
-        self.policy_learner = PolicyLearner.load(
-            path=state_path,
-            params=lp,
-            arm_keys=arms,
-            bootstrap_weights=boot,
-        )
-        self.policy_learner.sync_arms_with_config(arms, boot)
-        # FollowerTracker (PLRN-020): own-account followers snapshots for reward
-        self.follower_tracker = FollowerTracker(
-            path=lp.get('followers_state_path', 'learning_followers.json')
-        )
-        # FormatBandit (PLRN-010): Thompson over format_a/format_b
-        fl = self.config.get('format_learning', {}) or {}
-        if fl.get('enabled', True):
-            fmt_params = {**lp, **fl}
-            # force max_arm_share_24h from format_learning (0.70 for 2 arms)
-            if 'max_arm_share_24h' in fl:
-                fmt_params['max_arm_share_24h'] = fl['max_arm_share_24h']
-            self.format_bandit = PolicyLearner.load(
-                path=fl.get('state_path', 'learning_state_format.json'),
-                params=fmt_params,
-                arm_keys=list(FORMAT_ARM_KEYS),
-                bootstrap_weights={'format_a': 0.5, 'format_b': 0.5},
-            )
-        else:
-            self.format_bandit = None
-        # EngagementLearner (PLRN-011): topic-arm multipliers on like score
-        if not hasattr(self.memory, 'engagement_actions') or self.memory.engagement_actions is None:
+        # Learning stack (PolicyLearner / FormatBandit / Engagement / Safety / Retro)
+        if (
+            not hasattr(self.memory, "engagement_actions")
+            or self.memory.engagement_actions is None
+        ):
             self.memory.engagement_actions = []
-        self.engagement_learner = EngagementLearner.load(
+        self._config_path = getattr(self, "_config_path", None) or "bot_config.json"
+        self.learning = LearningOrchestrator.from_config(
             self.config,
-            base_params=lp,
+            config_path=self._config_path,
         )
-        # AgentDecisionLog (PLRN-012): append-only picks for strategy/format/engagement
-        self.decision_log = AgentDecisionLog(
-            path=lp.get("decision_log_path", "reports/agent_decisions.jsonl"),
-            max_lines=int(lp.get("decision_log_max_lines", 10000)),
-        )
-        # LlmRetro (PLRN-021): weekly allowlisted learning_parameters reflection
+        self.policy_learner = self.learning.policy_learner
+        self.format_bandit = self.learning.format_bandit
+        self.engagement_learner = self.learning.engagement_learner
+        self.follower_tracker = self.learning.follower_tracker
+        self.decision_log = self.learning.decision_log
+        self.llm_retro = self.learning.llm_retro
+        self.safety_governor = self.learning.safety_governor
         retro_cfg = self.config.get("llm_retro", {}) or {}
         self._llm_retro_enabled = bool(retro_cfg.get("enabled", False))
         self._llm_retro_interval_days = int(retro_cfg.get("interval_days", 7) or 7)
-        self.llm_retro = LlmRetro(
-            state_path=retro_cfg.get("state_path", "learning_retro_state.json"),
-            report_dir=retro_cfg.get("report_dir", "reports"),
-            dry_run=bool(retro_cfg.get("dry_run", False)),
-        )
         # Soft-fail duplicate replacement chain (SOFT-003; needs registry)
         self.duplicate_fallback_helper = DuplicateFallbackHelper(
             self._build_duplicate_fallback_ports()
@@ -970,23 +929,17 @@ class AutonomousBlueskyBotV2:
         context: Optional[Dict] = None,
     ) -> None:
         """Write one AgentDecisionLog line from learner meta or explicit reason."""
-        log = getattr(self, "decision_log", None)
-        if log is None:
+        orch = getattr(self, "learning", None)
+        if orch is None:
             return
-        meta = getattr(learner, "last_pick_meta", None) if learner else None
-        resolved_reason = reason
-        if not resolved_reason and isinstance(meta, dict):
-            resolved_reason = meta.get("reason")
-        try:
-            log.log(
-                domain=domain,
-                action=action,
-                arm=arm,
-                reason=resolved_reason or "thompson_or_epsilon",
-                context=context or {},
-            )
-        except Exception as exc:
-            logger.warning("decision_log failed: %s", exc)
+        orch.log_pick(
+            domain=domain,
+            action=action,
+            learner=learner,
+            arm=arm,
+            reason=reason,
+            context=context,
+        )
 
     def _on_engagement_like_action(
         self,
@@ -1167,8 +1120,8 @@ class AutonomousBlueskyBotV2:
 
     def _safety_status(self) -> SafetyStatus:
         """Gather budget / circuit / follower / error signals for SafetyGovernor."""
-        gov = getattr(self, "safety_governor", None)
-        if gov is None:
+        orch = getattr(self, "learning", None)
+        if orch is None:
             return SafetyStatus(ok=True)
 
         circuit_open: dict[str, bool] = {}
@@ -1197,7 +1150,7 @@ class AutonomousBlueskyBotV2:
             except Exception:
                 followers_delta_1h = None
 
-        return gov.evaluate(
+        return orch.safety_status(
             budget_summary=budget_summary,
             circuit_open=circuit_open or None,
             followers_delta_1h=followers_delta_1h,

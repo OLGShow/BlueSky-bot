@@ -164,12 +164,15 @@ class TestPickArmMeta:
 class TestBotWiringSource:
     def test_bot_imports_and_wires_decision_log(self) -> None:
         src = _bot_source()
-        assert "from agent_decision_log import AgentDecisionLog" in src
-        assert "self.decision_log = AgentDecisionLog" in src
+        assert "LearningOrchestrator.from_config" in src
+        assert "self.decision_log = self.learning.decision_log" in src
         assert 'domain="strategy"' in src
         assert 'domain="format"' in src
         assert 'domain="engagement"' in src
         assert "_log_bandit_pick" in src
+        orch = (APP_DIR / "learning_orchestrator.py").read_text(encoding="utf-8")
+        assert "from agent_decision_log import AgentDecisionLog" in orch
+        assert "AgentDecisionLog(" in orch
 
     def test_agent_decision_log_no_bot_import(self) -> None:
         tree = ast.parse(LOG_PATH.read_text(encoding="utf-8"), filename=str(LOG_PATH))

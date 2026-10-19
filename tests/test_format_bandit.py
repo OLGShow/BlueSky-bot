@@ -88,9 +88,12 @@ class TestNoBotImportInPolicyLearner:
 class TestBotWiresFormatBandit:
     def test_init_loads_format_bandit(self) -> None:
         src = _bot_source()
-        assert "format_learning" in src
-        assert "self.format_bandit = PolicyLearner.load" in src
-        assert "learning_state_format.json" in src
+        assert "LearningOrchestrator.from_config" in src
+        assert "self.format_bandit = self.learning.format_bandit" in src
+        orch = (APP_DIR / "learning_orchestrator.py").read_text(encoding="utf-8")
+        assert "format_learning" in orch
+        assert "learning_state_format.json" in orch
+        assert "PolicyLearner.load" in orch
 
     def test_create_scheduled_post_delegates_to_format_bandit(self) -> None:
         body = _create_scheduled_post_body(_bot_source())

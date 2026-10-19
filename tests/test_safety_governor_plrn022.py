@@ -220,7 +220,15 @@ class TestBotAstWiring:
 
     def test_bot_wires_safety_governor(self) -> None:
         src = BOT_PATH.read_text(encoding="utf-8")
-        tree = ast.parse(src, filename=str(BOT_PATH))
+        assert "from learning_orchestrator import LearningOrchestrator" in src
+        assert "self.safety_governor = self.learning.safety_governor" in src
+        assert "def _safety_status" in src
+        assert "can_publish" in src
+        assert "can_credit" in src
+        assert "can_sync_config" in src or "can_sync" in src
+        assert "can_engagement" in src
+        orch = (APP_DIR / "learning_orchestrator.py").read_text(encoding="utf-8")
+        tree = ast.parse(orch, filename=str(APP_DIR / "learning_orchestrator.py"))
         imported = False
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module == "safety_governor":
@@ -228,11 +236,7 @@ class TestBotAstWiring:
                 assert "SafetyGovernor" in names
                 imported = True
         assert imported
-        assert "def _safety_status" in src
-        assert "can_publish" in src
-        assert "can_credit" in src
-        assert "can_sync_config" in src or "can_sync" in src
-        assert "can_engagement" in src
+        assert "SafetyGovernor(" in orch
 
 
 class TestSafetyStatusDataclass:

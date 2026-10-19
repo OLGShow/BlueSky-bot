@@ -124,6 +124,8 @@ dmypy.json
 
 # Bot specific files
 bot.log
+bot.log.*
+/audit.log
 bot_memory.pkl
 **/bot_memory.pkl
 bot_memory.json
@@ -138,6 +140,10 @@ action_ledger.jsonl
 dry_run_report.json
 # Local agent / verify output (never commit; root only)
 /reports/
+# Deploy-mirror daily reports (runtime, not SoT)
+opt/bluesky-bot/reports/
+# IDE workspace file at repo root
+*.code-workspace
 # Permanent develop docs reports must remain trackable
 !ai_docs/develop/reports/
 !ai_docs/develop/reports/**

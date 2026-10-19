@@ -5,7 +5,7 @@
 ### 🔧 Основные файлы установки:
 - `install.sh` - **Главный автоматический инсталлятор**
 - `env.example` - Пример конфигурации
-- `quick-install.md` - Краткая инструкция установки
+- `docs/ops/quick-install.md` - Краткая инструкция установки
 
 ### 🐳 Docker поддержка:
 - `Dockerfile` - Образ контейнера
@@ -17,7 +17,7 @@
 
 ### 📚 Документация:
 - `README.md` - Обновленная документация с инструкциями
-- `deployment-info.md` - Этот файл
+- `docs/ops/deployment-info.md` - Этот файл
 
 ---
 
@@ -28,7 +28,7 @@
 # В файлах нужно заменить YOUR_USERNAME на ваш GitHub username:
 - install.sh (строка 96)
 - README.md (строка 29) 
-- quick-install.md (строка 5)
+- docs/ops/quick-install.md (строка 5)
 - systemd/bluesky-bot.service (строка 3)
 ```
 

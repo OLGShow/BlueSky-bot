@@ -114,6 +114,7 @@ systemctl status bluesky-bot 2>/dev/null || echo "service removed"
 
 - Для сетапа пакета: `packaging/deb/`
 - Для альтернативного opkg-сценария (не основной путь): `packaging/OPKG-ALTERNATIVE.md`
+- Ops / install docs: [`docs/ops/`](docs/ops/)
 - Ротация секретов и ручная очистка git-history: [`ai_docs/develop/architecture/2026-09-15-secret-rotation-runbook.md`](ai_docs/develop/architecture/2026-09-15-secret-rotation-runbook.md)
 
 ---

@@ -31,8 +31,8 @@ PYFILES=(
     ai_improvements.py
     bluesky_post_formatter.py
     bluesky_rich_posts.py
+    agent_decision_log.py
     bot_cycle.py
-    bot_learning_module.py
     bot_monitor.py
     content_ports.py
     content_publish_state.py
@@ -40,6 +40,7 @@ PYFILES=(
     daily_reporting.py
     dynamic_content_system.py
     engagement_cache_sync.py
+    engagement_learner.py
     engagement_ports.py
     engagement_service.py
     follow_strategy.py
@@ -50,6 +51,7 @@ PYFILES=(
     log_sanitizer.py
     openrouter_adapter.py
     pollinations_adapter.py
+    policy_learner.py
     quality_pipeline.py
     relevance_scoring.py
     resilience_service.py

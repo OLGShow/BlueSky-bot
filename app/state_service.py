@@ -48,6 +48,7 @@ _DEFAULT_RETENTION = {
     'pattern_blacklist': 50,
     'published_content_hashes': 2000,
     'published_urls': 2000,
+    'engagement_actions': 500,
 }
 
 
@@ -207,6 +208,7 @@ class StateService:
             for fld, default in [('ab_results', {}), ('topic_outcomes', {}),
                                  ('source_outcomes', {}), ('pattern_blacklist', [])]:
                 data.setdefault(fld, default)
+        data.setdefault('engagement_actions', [])
         return data
 
     @staticmethod
@@ -222,6 +224,7 @@ class StateService:
             'engagement_metrics': {},
             'ab_results': {}, 'topic_outcomes': {},
             'source_outcomes': {}, 'pattern_blacklist': [],
+            'engagement_actions': [],
         }
         for k, v in defaults.items():
             data.setdefault(k, v)
@@ -245,7 +248,8 @@ class StateService:
                      'trending_topics', 'user_relationships', 'content_performance',
                      'last_update', 'published_content_hashes', 'published_urls',
                      'repost_performance', 'viral_posts', 'engagement_metrics',
-                     'ab_results', 'topic_outcomes', 'source_outcomes', 'pattern_blacklist'):
+                     'ab_results', 'topic_outcomes', 'source_outcomes', 'pattern_blacklist',
+                     'engagement_actions'):
             val = getattr(memory, fld, None)
             if val is not None:
                 result[fld] = val
@@ -264,6 +268,7 @@ class StateService:
             'last_update', 'published_content_hashes', 'published_urls',
             'repost_performance', 'viral_posts', 'engagement_metrics',
             'ab_results', 'topic_outcomes', 'source_outcomes', 'pattern_blacklist',
+            'engagement_actions',
         }
         init_data = {}
         extra_data = {}
@@ -296,6 +301,7 @@ class StateService:
             engagement_metrics={},
             ab_results={}, topic_outcomes={},
             source_outcomes={}, pattern_blacklist=[],
+            engagement_actions=[],
         )
 
 

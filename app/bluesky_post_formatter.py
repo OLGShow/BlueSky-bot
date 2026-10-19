@@ -186,6 +186,34 @@ class BlueskyPostFormatter:
         
         return facets
     
+    def create_poll(
+        self,
+        *,
+        question: str,
+        options: List[str],
+        duration_hours: int = 24,
+        content_type: str = "poll",
+    ) -> RichTextPost:
+        """Build a poll-style post (question + numbered options as text).
+
+        Bluesky native poll embeds are not used here; options are rendered in the
+        post body so strategies can call a stable ``create_poll`` API (STRAT-007).
+        """
+        lines = [str(question or "").strip()]
+        for idx, opt in enumerate(options or [], start=1):
+            label = str(opt).strip()
+            if label:
+                lines.append(f"{idx}) {label}")
+        if duration_hours:
+            lines.append(f"(poll ~{int(duration_hours)}h)")
+        body = "\n".join(line for line in lines if line)
+        return self.create_post(
+            text=body,
+            auto_format=True,
+            add_emojis=True,
+            content_type=content_type or "poll",
+        )
+
     def create_post(self, 
                    text: str, 
                    auto_format: bool = True,

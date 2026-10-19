@@ -11,7 +11,7 @@ import json
 import os
 import logging
 from logging.handlers import RotatingFileHandler
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import Counter, defaultdict
 from typing import List, Dict, Optional, Set, Tuple, Callable
 import aiohttp
@@ -26,7 +26,19 @@ import time
 import html
 import hashlib
 from dotenv import load_dotenv
-from bot_learning_module import BotLearningModule
+from policy_learner import (
+    FORMAT_ARM_KEYS,
+    PolicyLearner,
+    eligible_catch_up_checks,
+    eligible_format_catch_up_checks,
+    recent_format_keys_24h,
+    recent_strategy_keys_24h,
+)
+from engagement_learner import (
+    EngagementLearner,
+    eligible_engagement_catch_up_checks,
+)
+from agent_decision_log import AgentDecisionLog
 
 # Новые импорты для форматирования
 from bluesky_post_formatter import BlueskyPostFormatter, PostTemplates, RichTextPost
@@ -74,6 +86,7 @@ from post_strategies import (
     PostStrategyRegistry,
     StrategyLookupError,
     build_bound_registry,
+    successful_post_bandit_fields,
 )
 from content_service import (
     ContentService,
@@ -180,8 +193,6 @@ from smart_engagement import (
     SmartEngagementOrchestrator,
     SmartEngagementPorts,
 )
-from strategy_learning import apply_strategy_weights_from_outcomes
-
 # Настройка логирования с абсолютным путем
 import sys
 
@@ -323,6 +334,8 @@ class BotMemory:
     topic_outcomes: Dict[str, Dict] = field(default_factory=dict)
     source_outcomes: Dict[str, Dict] = field(default_factory=dict)
     pattern_blacklist: List[str] = field(default_factory=list)
+    # PLRN-011: liked/reposted foreign posts for topic-arm credit
+    engagement_actions: List[Dict] = field(default_factory=list)
     
     _state_svc = StateService()
 
@@ -558,9 +571,6 @@ class AutonomousBlueskyBotV2:
         self.max_posts_per_day = min(limits.get('max_posts_per_day', 10), 50)
         self.max_interactions_per_cycle = limits.get('max_interactions_per_cycle', 5)
 
-        # Инициализация модуля обучения
-        self.learning_module = BotLearningModule(self.memory, 'bot_config.json')
-        
         # Инициализация системы трендов и динамической генерации контента
         self.trending_tracker = BlueSkyTrendingTracker(self.bluesky_client)
         self.dynamic_generator = DynamicContentGenerator(self.trending_tracker)
@@ -586,6 +596,8 @@ class AutonomousBlueskyBotV2:
         # A/B suffix for current generation cycle
         self._current_ab_format = 'format_a'
         self._current_ab_suffix = ''
+        # Config key of the strategy chosen for the current post (PLRN-001)
+        self._current_strategy_key: Optional[str] = None
         self._quality_gate_regen_mode = False
         # Circuit breaker (main loop level)
         self._consecutive_errors = 0
@@ -672,6 +684,46 @@ class AutonomousBlueskyBotV2:
         )
         # Hybrid registry: extracted strategies + bound methods for the rest.
         self.post_strategy_registry = self._build_post_strategy_registry()
+        # PolicyLearner (PLRN-005): Thompson bandit over strategy arms
+        lp = self.config.get('learning_parameters', {}) or {}
+        state_path = lp.get('state_path', 'learning_state.json')
+        arms = list(self.config.get('post_strategies', {}).keys())
+        boot = dict(self.config.get('post_strategies', {}))
+        self._config_path = getattr(self, '_config_path', None) or 'bot_config.json'
+        self.policy_learner = PolicyLearner.load(
+            path=state_path,
+            params=lp,
+            arm_keys=arms,
+            bootstrap_weights=boot,
+        )
+        self.policy_learner.sync_arms_with_config(arms, boot)
+        # FormatBandit (PLRN-010): Thompson over format_a/format_b
+        fl = self.config.get('format_learning', {}) or {}
+        if fl.get('enabled', True):
+            fmt_params = {**lp, **fl}
+            # force max_arm_share_24h from format_learning (0.70 for 2 arms)
+            if 'max_arm_share_24h' in fl:
+                fmt_params['max_arm_share_24h'] = fl['max_arm_share_24h']
+            self.format_bandit = PolicyLearner.load(
+                path=fl.get('state_path', 'learning_state_format.json'),
+                params=fmt_params,
+                arm_keys=list(FORMAT_ARM_KEYS),
+                bootstrap_weights={'format_a': 0.5, 'format_b': 0.5},
+            )
+        else:
+            self.format_bandit = None
+        # EngagementLearner (PLRN-011): topic-arm multipliers on like score
+        if not hasattr(self.memory, 'engagement_actions') or self.memory.engagement_actions is None:
+            self.memory.engagement_actions = []
+        self.engagement_learner = EngagementLearner.load(
+            self.config,
+            base_params=lp,
+        )
+        # AgentDecisionLog (PLRN-012): append-only picks for strategy/format/engagement
+        self.decision_log = AgentDecisionLog(
+            path=lp.get("decision_log_path", "reports/agent_decisions.jsonl"),
+            max_lines=int(lp.get("decision_log_max_lines", 10000)),
+        )
         # Soft-fail duplicate replacement chain (SOFT-003; needs registry)
         self.duplicate_fallback_helper = DuplicateFallbackHelper(
             self._build_duplicate_fallback_ports()
@@ -858,6 +910,9 @@ class AutonomousBlueskyBotV2:
                 self.bluesky_client.get_timeline, limit=limit, cursor=cursor
             )
 
+        eng = getattr(self, "engagement_learner", None)
+        eng_enabled = bool(eng and eng.enabled)
+
         return SmartEngagementPorts(
             timeline=CallableTimelinePage(_fetch_timeline),
             relevance=CallableRelevance(self.calculate_relevance),
@@ -879,7 +934,99 @@ class AutonomousBlueskyBotV2:
             bump_errors=lambda: self.session_stats.__setitem__(
                 "errors", self.session_stats.get("errors", 0) + 1
             ),
+            infer_topic=eng.infer_topic if eng_enabled else None,
+            topic_multiplier=eng.topic_multiplier if eng_enabled else None,
+            on_like_action=self._on_engagement_like_action if eng_enabled else None,
         )
+
+    def _log_bandit_pick(
+        self,
+        domain: str,
+        action: str,
+        arm: str,
+        learner: Optional[PolicyLearner] = None,
+        reason: Optional[str] = None,
+        context: Optional[Dict] = None,
+    ) -> None:
+        """Write one AgentDecisionLog line from learner meta or explicit reason."""
+        log = getattr(self, "decision_log", None)
+        if log is None:
+            return
+        meta = getattr(learner, "last_pick_meta", None) if learner else None
+        resolved_reason = reason
+        if not resolved_reason and isinstance(meta, dict):
+            resolved_reason = meta.get("reason")
+        try:
+            log.log(
+                domain=domain,
+                action=action,
+                arm=arm,
+                reason=resolved_reason or "thompson_or_epsilon",
+                context=context or {},
+            )
+        except Exception as exc:
+            logger.warning("decision_log failed: %s", exc)
+
+    def _on_engagement_like_action(
+        self,
+        *,
+        kind: str = "like",
+        topic: str = "_other",
+        uri: str = "",
+        ts: Optional[str] = None,
+        rewarded_checks: Optional[List] = None,
+        multiplier: Optional[float] = None,
+        score: Optional[float] = None,
+        effective_score: Optional[float] = None,
+        **_kwargs,
+    ) -> None:
+        """Record liked URI for topic-arm credit; schedule 6h/24h checks."""
+        if not uri or not getattr(self, "engagement_learner", None):
+            return
+        if not self.engagement_learner.enabled:
+            return
+        actions = self.memory.engagement_actions
+        if actions is None:
+            self.memory.engagement_actions = []
+            actions = self.memory.engagement_actions
+        action = self.engagement_learner.record_action(
+            actions,
+            kind=kind,
+            topic=topic,
+            uri=uri,
+            ts=ts,
+        )
+        if rewarded_checks is not None and not action.get("rewarded_checks"):
+            action["rewarded_checks"] = list(rewarded_checks)
+        try:
+            self.memory.save()
+        except Exception as e:
+            logger.warning("engagement_actions save failed: %s", e)
+        mult = multiplier
+        if mult is None:
+            try:
+                mult = float(self.engagement_learner.topic_multiplier(topic))
+            except Exception:
+                mult = 1.0
+        self._log_bandit_pick(
+            domain="engagement",
+            action=kind or "like",
+            arm=str(topic or "_other"),
+            reason="topic_multiplier",
+            context={
+                "multiplier": float(mult),
+                "score": score,
+                "effective_score": effective_score,
+                "uri": (uri or "")[:80],
+            },
+        )
+        for hours in self.engagement_learner.action_credit_delays_hours(self.config):
+            delay_s = int(float(hours) * 3600)
+            if delay_s <= 0:
+                continue
+            self._spawn_background(
+                self.delayed_engagement_credit_check(uri, delay_s)
+            )
 
     def _build_bot_cycle_ports(self) -> CallableBotCyclePorts:
         """Composition-root wiring: bot attrs → BotCyclePorts (CYCLE-001)."""
@@ -937,7 +1084,8 @@ class AutonomousBlueskyBotV2:
         Unextracted families stay as bound methods. News/RSS is overwritten with
         :attr:`quality_news_strategy` under stable key ``STRATEGY_NAME`` so
         learning / A/B weight names remain unchanged. Runtime dispatch uses
-        ``registry.weighted_entries`` / ``resolve`` in ``create_scheduled_post``.
+        ``registry.weighted_named_entries`` / ``resolve`` in
+        ``create_scheduled_post``.
         """
         names = list(self.config.get("post_strategies", {}).keys())
         registry, registered, missing = build_bound_registry(self, names)
@@ -1020,6 +1168,7 @@ class AutonomousBlueskyBotV2:
 
     def load_external_config(self, config_file='bot_config.json'):
         """Загружает внешнюю конфигурацию, чтобы ее можно было изменять."""
+        self._config_path = config_file
         try:
             with open(config_file, 'r') as f:
                 logger.info(f"⚙️ Загрузка конфигурации из {config_file}")
@@ -1355,29 +1504,48 @@ class AutonomousBlueskyBotV2:
             # НИКОГДА НЕ СОЗДАЕМ THREAD АВТОМАТИЧЕСКИ
             logger.info("🎨 Создание качественного поста...")
             
-            # Стратегии и веса через PostStrategyRegistry (config keys = learning names)
+            # Strategy arms from config (PolicyLearner pick; registry must resolve)
             strategies_config = self.config.get('post_strategies', {})
-            strategies = self.post_strategy_registry.weighted_entries(
-                strategies_config,
-                skip_missing=True,  # match prior hasattr skip; empty → error below
-            )
-            if not strategies:
+            arm_keys = [
+                k for k in strategies_config.keys()
+                if k in self.post_strategy_registry
+            ]
+            if not arm_keys:
                 logger.error("❌ Не найдено ни одной валидной стратегии в конфигурации!")
                 return
             
-            # A/B format selection — persist suffix so generators can read it
-            ab_format = self.ab_engine.pick_format()
+            # FormatBandit pick (fallback: ABEngine ε-greedy when disabled)
+            if self.format_bandit is not None:
+                recent_formats = recent_format_keys_24h(
+                    self.memory.successful_posts
+                )
+                ab_format = self.format_bandit.pick_arm(
+                    list(FORMAT_ARM_KEYS), recent_formats
+                )
+                self.format_bandit.record_pick(ab_format)
+                self._log_bandit_pick(
+                    domain="format",
+                    action="pick_format",
+                    arm=ab_format,
+                    learner=self.format_bandit,
+                    context={"recent_24h": len(recent_formats)},
+                )
+            else:
+                ab_format = self.ab_engine.pick_format()
+                self._log_bandit_pick(
+                    domain="format",
+                    action="pick_format",
+                    arm=ab_format,
+                    reason="ab_engine",
+                )
             self._current_ab_format = ab_format
             self._current_ab_suffix = self.ab_engine.get_prompt_suffix(ab_format)
             logger.info(f"🔬 A/B формат: {ab_format} | suffix len={len(self._current_ab_suffix)}")
 
-            # Trend Radar: topic of the day from successful_posts + cached timeline + RSS headlines
-            trend_topic = None
+            # Trend Radar: topic of the day (telemetry / prompts only; no weight boost)
             try:
                 trend_texts = [p.get('text', '')[:200] for p in self.memory.successful_posts[-50:]]
-                # Add cached timeline snippets (populated in smart_engagement)
                 trend_texts += getattr(self, '_trend_timeline_snippets', [])
-                # Add RSS headlines from the last fetch (populated in fetch_external_content)
                 trend_texts += getattr(self, '_trend_rss_headlines', [])
                 trend_topic = self.trend_radar.get_topic_of_day(trend_texts)
                 if trend_topic:
@@ -1385,27 +1553,36 @@ class AutonomousBlueskyBotV2:
             except Exception:
                 pass
 
-            # Audience memory: boost strategy weights for top-performing topics
-            if trend_topic and self.memory.topic_outcomes:
-                outcomes = self.memory.topic_outcomes
-                if trend_topic in outcomes and outcomes[trend_topic].get('count', 0) > 0:
-                    topic_er = outcomes[trend_topic]['total_er'] / outcomes[trend_topic]['count']
-                    strategies = [
-                        (fn, w * (1.3 if trend_topic in (fn.__name__ if callable(fn) else '') else 1.0))
-                        for fn, w in strategies
-                    ]
-                    logger.info(f"🧠 Audience memory: буст для темы '{trend_topic}' (avg ER={topic_er:.2f})")
-
-            # Взвешенный выбор стратегии
-            strategy = self._weighted_choice(strategies)
-            post = await strategy()
+            # Thompson pick → record → resolve (PLRN-005)
+            recent_keys = recent_strategy_keys_24h(self.memory.successful_posts)
+            strategy_key = self.policy_learner.pick_arm(arm_keys, recent_keys)
+            self.policy_learner.record_pick(strategy_key)
+            self._current_strategy_key = strategy_key
+            self._log_bandit_pick(
+                domain="strategy",
+                action="pick_strategy",
+                arm=strategy_key,
+                learner=self.policy_learner,
+                context={"recent_24h": len(recent_keys)},
+            )
+            post = await self.post_strategy_registry.resolve(strategy_key)()
 
             # Unified quality pipeline (QUAL-002): gate regen + score, staged reasons
             recent_texts = [p.get('text', '') for p in self.memory.successful_posts[-20:]]
 
             async def _regen_weighted_strategy():
-                chosen = self._weighted_choice(strategies)
-                return await chosen()
+                # Re-pick via PolicyLearner on quality regen (Phase A)
+                regen_key = self.policy_learner.pick_arm(arm_keys, recent_keys)
+                self.policy_learner.record_pick(regen_key)
+                self._current_strategy_key = regen_key
+                self._log_bandit_pick(
+                    domain="strategy",
+                    action="pick_strategy_regen",
+                    arm=regen_key,
+                    learner=self.policy_learner,
+                    context={"recent_24h": len(recent_keys)},
+                )
+                return await self.post_strategy_registry.resolve(regen_key)()
 
             post, quality_result = await regenerate_until_quality(
                 post,
@@ -1476,6 +1653,7 @@ class AutonomousBlueskyBotV2:
                 
                 # УЛУЧШЕННОЕ сохранение для анализа с вирусными метриками
                 content_hash = self._generate_content_hash(post.text, url, image_url)
+                strategy_key = self._current_strategy_key or strategy_key
                 post_data = {
                     'text': post.text,
                     'uri': created.uri,
@@ -1487,11 +1665,13 @@ class AutonomousBlueskyBotV2:
                     'url': url,
                     'image_url': image_url,
                     'ab_format': ab_format,
+                    'format_rewarded_checks': [],
                     # Вирусные метрики
                     'viral_score': getattr(post, 'viral_score', 0.0),
                     'viral_factors': getattr(post, 'viral_factors', []),
                     'predicted_engagement': 0,
-                    'actual_engagement': 0
+                    'actual_engagement': 0,
+                    **successful_post_bandit_fields(strategy_key),
                 }
                 
                 self.memory.successful_posts.append(post_data)
@@ -1546,8 +1726,20 @@ class AutonomousBlueskyBotV2:
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
-    def _weighted_choice(self, strategies: List[Tuple]) -> callable:
-        """Взвешенный выбор стратегии создания поста"""
+    def _weighted_choice(self, strategies: List[Tuple]):
+        """Взвешенный выбор стратегии создания поста.
+
+        Accepts ``(fn, weight)`` pairs (legacy) or ``(name, fn, weight)``
+        triples. Named triples return ``(name, fn)`` so callers can persist
+        the config key as ``strategy_key``.
+        """
+        if not strategies:
+            raise ValueError("strategies must be non-empty")
+        sample = strategies[0]
+        if len(sample) >= 3:
+            named = [(name, fn) for name, fn, _weight in strategies]
+            weights = [weight for _name, _fn, weight in strategies]
+            return random.choices(named, weights=weights)[0]
         functions, weights = zip(*strategies)
         return random.choices(functions, weights=weights)[0]
     
@@ -2022,15 +2214,7 @@ class AutonomousBlueskyBotV2:
             
             self.session_stats['comments_made'] += 1
             logger.info(f"✅ Комментарий опубликован!")
-            
-            # Сохраняем в память для анализа
-            self.memory.successful_posts.append({
-                'text': formatted_comment.text,
-                'type': 'comment',
-                'parent_post': post.post.uri,
-                'timestamp': datetime.now().isoformat(),
-                'relevance_score': 0.5  # Фиксированный балл для комментариев
-            })
+            # Comments stay out of successful_posts (noise for PolicyLearner credit)
 
         except OutboundContentError as e:
             logger.warning(f"⚠️ Комментарий отклонён на границе публикации: {e}")
@@ -2041,7 +2225,13 @@ class AutonomousBlueskyBotV2:
         """Основной цикл работы бота с улучшенной безопасностью"""
         if not await self.authenticate():
             return
-        
+
+        # Restart catch-up: credit missed 6h/24h checks (async metrics need auth)
+        try:
+            await self.catch_up_pending_credits()
+        except Exception as e:
+            logger.error(f"Ошибка startup catch-up credits: {e}")
+
         cycle_count = 0
         last_post_time = datetime.now() - timedelta(hours=2)  # Начинаем с большой паузы
         
@@ -2104,15 +2294,6 @@ class AutonomousBlueskyBotV2:
                     logger.error("❌ Не удалось переподключиться. Завершение работы.")
                     break
         
-        # В конце цикла запускаем обучение
-        try:
-            self.learning_module.analyze_performance_and_learn()
-            # Перезагружаем конфиг после возможного обучения
-            self.config = self.learning_module.load_config()
-            logger.info("✅ Конфигурация перезагружена после цикла обучения.")
-        except Exception as e:
-            logger.error(f"❌ Ошибка в цикле самообучения: {e}")
-    
     async def shutdown(self) -> None:
         """Корректное завершение работы бота"""
         logger.info("🛑 Завершение работы бота...")
@@ -2261,55 +2442,357 @@ class AutonomousBlueskyBotV2:
         # Сохраняем обновленную память
         self.memory.save()
     
+    async def catch_up_pending_credits(self) -> None:
+        """Startup catch-up: fetch metrics + credit missed 6h/24h checks."""
+        now = datetime.now(timezone.utc)
+        any_credited = False
+        any_format_credited = False
+        scanned = 0
+        credited_n = 0
+        format_credited_n = 0
+
+        for post in self.memory.successful_posts:
+            checks = eligible_catch_up_checks(post, now)
+            fmt_checks = (
+                eligible_format_catch_up_checks(post, now)
+                if self.format_bandit is not None
+                else []
+            )
+            if not checks and not fmt_checks:
+                continue
+            scanned += 1
+            uri = post.get('uri')
+            strategy_key = post.get('strategy_key')
+            try:
+                metrics = await self.analyze_post_performance(uri)
+            except Exception as e:
+                logger.warning(
+                    "⚠️ Catch-up: не удалось получить метрики %s: %s",
+                    str(uri)[-12:] if uri else '?',
+                    str(e)[:80],
+                )
+                continue
+
+            post['likes'] = metrics.get('likes')
+            post['reposts'] = metrics.get('reposts')
+            post['replies'] = metrics.get('replies')
+            if 'engagement_rate' in metrics:
+                post['engagement_rate'] = metrics.get('engagement_rate')
+
+            rewarded = post.setdefault('rewarded_checks', [])
+            for check_id in checks:
+                if check_id in rewarded:
+                    continue
+                ok = self.policy_learner.credit(
+                    strategy_key,
+                    post['likes'],
+                    post['reposts'],
+                    post['replies'],
+                    check_id,
+                )
+                if ok:
+                    rewarded.append(check_id)
+                    any_credited = True
+                    credited_n += 1
+                    logger.info(
+                        "🧠 Catch-up credit %s arm=%s likes=%s reposts=%s replies=%s",
+                        check_id,
+                        strategy_key,
+                        post['likes'],
+                        post['reposts'],
+                        post['replies'],
+                    )
+
+            ab_fmt = post.get('ab_format')
+            if self.format_bandit is not None and ab_fmt and fmt_checks:
+                fmt_rewarded = post.setdefault('format_rewarded_checks', [])
+                for check_id in fmt_checks:
+                    if check_id in fmt_rewarded:
+                        continue
+                    ok = self.format_bandit.credit(
+                        ab_fmt,
+                        post['likes'],
+                        post['reposts'],
+                        post['replies'],
+                        check_id,
+                    )
+                    if ok:
+                        fmt_rewarded.append(check_id)
+                        any_format_credited = True
+                        format_credited_n += 1
+                        logger.info(
+                            "🧠 Format catch-up credit %s arm=%s likes=%s "
+                            "reposts=%s replies=%s",
+                            check_id,
+                            ab_fmt,
+                            post['likes'],
+                            post['reposts'],
+                            post['replies'],
+                        )
+
+            await asyncio.sleep(0.5)
+
+        if any_credited:
+            self.policy_learner.sync_config_weights(self._config_path)
+            self.config['post_strategies'] = self.policy_learner.export_weights()
+            self.policy_learner.save()
+
+        if any_format_credited and self.format_bandit is not None:
+            self.format_bandit.save()
+
+        if any_credited or any_format_credited:
+            self.memory.save()
+
+        if scanned or credited_n or format_credited_n:
+            logger.info(
+                "🔄 Catch-up pending credits: scanned=%s credited=%s "
+                "format_credited=%s",
+                scanned,
+                credited_n,
+                format_credited_n,
+            )
+
+        await self.catch_up_engagement_credits()
+
+    async def catch_up_engagement_credits(self) -> None:
+        """Startup catch-up for engagement_actions topic-arm credits (PLRN-011)."""
+        eng = getattr(self, "engagement_learner", None)
+        if not eng or not eng.enabled:
+            return
+        actions = getattr(self.memory, "engagement_actions", None) or []
+        if not actions:
+            return
+
+        now = datetime.now(timezone.utc)
+        any_credited = False
+        scanned = 0
+        credited_n = 0
+
+        for action in actions:
+            checks = eligible_engagement_catch_up_checks(action, now)
+            if not checks:
+                continue
+            scanned += 1
+            uri = action.get("uri")
+            topic = action.get("topic") or "_other"
+            try:
+                metrics = await self.analyze_post_performance(uri)
+            except Exception as e:
+                logger.warning(
+                    "⚠️ Engagement catch-up metrics %s: %s",
+                    str(uri)[-12:] if uri else "?",
+                    str(e)[:80],
+                )
+                continue
+
+            likes = metrics.get("likes", 0)
+            reposts = metrics.get("reposts", 0)
+            replies = metrics.get("replies", 0)
+            rewarded = action.setdefault("rewarded_checks", [])
+            for check_id in checks:
+                if check_id in rewarded:
+                    continue
+                ok = eng.credit(topic, likes, replies, reposts, check_id)
+                if ok:
+                    rewarded.append(check_id)
+                    any_credited = True
+                    credited_n += 1
+                    logger.info(
+                        "🧠 Engagement catch-up %s topic=%s likes=%s "
+                        "reposts=%s replies=%s",
+                        check_id,
+                        topic,
+                        likes,
+                        reposts,
+                        replies,
+                    )
+            await asyncio.sleep(0.5)
+
+        if any_credited:
+            eng.save()
+            self.memory.save()
+
+        if scanned or credited_n:
+            logger.info(
+                "🔄 Engagement catch-up: scanned=%s credited=%s",
+                scanned,
+                credited_n,
+            )
+
+    async def delayed_engagement_credit_check(
+        self, post_uri: str, delay: int
+    ) -> None:
+        """Delayed 6h/24h credit for a liked foreign post (topic arm)."""
+        await asyncio.sleep(delay)
+        eng = getattr(self, "engagement_learner", None)
+        if not eng or not eng.enabled:
+            return
+        if delay <= 21600:
+            check_id = "6h"
+        else:
+            check_id = "24h"
+
+        try:
+            performance = await self.analyze_post_performance(post_uri)
+        except Exception as e:
+            logger.error("Engagement delayed metrics failed: %s", e)
+            return
+
+        likes = performance.get("likes", 0)
+        reposts = performance.get("reposts", 0)
+        replies = performance.get("replies", 0)
+        actions = getattr(self.memory, "engagement_actions", None) or []
+        any_ok = False
+        for action in actions:
+            if action.get("uri") != post_uri:
+                continue
+            rewarded = action.setdefault("rewarded_checks", [])
+            if check_id in rewarded:
+                continue
+            topic = action.get("topic") or "_other"
+            if eng.credit(topic, likes, replies, reposts, check_id):
+                rewarded.append(check_id)
+                any_ok = True
+                logger.info(
+                    "🧠 EngagementLearner credit %s topic=%s likes=%s "
+                    "reposts=%s replies=%s",
+                    check_id,
+                    topic,
+                    likes,
+                    reposts,
+                    replies,
+                )
+        if any_ok:
+            eng.save()
+            try:
+                self.memory.save()
+            except Exception as e:
+                logger.warning("engagement credit memory save: %s", e)
+
     async def delayed_performance_check(self, post_uri: str, delay: int) -> None:
-        """Отложенная проверка эффективности поста + A/B ER tracking + audience memory."""
+        """Отложенная проверка: метрики; 6h/24h → PolicyLearner credit + config sync."""
         await asyncio.sleep(delay)
 
         try:
             performance = await self.analyze_post_performance(post_uri)
             er = performance.get('engagement_rate', 0)
+            if delay <= 3600:
+                check_id = '1h'
+            elif delay <= 21600:
+                check_id = '6h'
+            else:
+                check_id = '24h'
 
             for post in self.memory.successful_posts:
-                if post.get('uri') == post_uri:
-                    post['engagement_rate'] = er
-                    post['final_stats'] = performance
+                if post.get('uri') != post_uri:
+                    continue
 
-                    # A/B ER tracking
-                    ab_fmt = post.get('ab_format')
-                    if ab_fmt:
-                        if delay <= 3600:
-                            self.ab_engine.record_er(ab_fmt, er_1h=er)
-                        elif delay <= 21600:
-                            self.ab_engine.record_er(ab_fmt, er_6h=er)
-                        else:
-                            self.ab_engine.record_er(ab_fmt, er_24h=er)
-                        self.memory.ab_results = self.ab_engine.results
-                        logger.info(f"🔬 A/B ER записан: format={ab_fmt}, er={er:.3f} (delay={delay//3600}h)")
+                post['engagement_rate'] = er
+                post['final_stats'] = performance
+                post['likes'] = performance.get('likes')
+                post['reposts'] = performance.get('reposts')
+                post['replies'] = performance.get('replies')
 
-                    # Audience memory: topic_outcomes
-                    topic = post.get('type', 'general')
-                    if topic not in self.memory.topic_outcomes:
-                        self.memory.topic_outcomes[topic] = {'total_er': 0.0, 'count': 0}
-                    self.memory.topic_outcomes[topic]['total_er'] += er
-                    self.memory.topic_outcomes[topic]['count'] += 1
+                # A/B ER tracking
+                ab_fmt = post.get('ab_format')
+                if ab_fmt:
+                    if check_id == '1h':
+                        self.ab_engine.record_er(ab_fmt, er_1h=er)
+                    elif check_id == '6h':
+                        self.ab_engine.record_er(ab_fmt, er_6h=er)
+                    else:
+                        self.ab_engine.record_er(ab_fmt, er_24h=er)
+                    self.memory.ab_results = self.ab_engine.results
+                    logger.info(
+                        f"🔬 A/B ER записан: format={ab_fmt}, er={er:.3f} "
+                        f"(check={check_id})"
+                    )
 
-                    if er > 10:
-                        logger.info(f"🎯 Успешный пост! Вовлеченность: {er}")
+                # Audience memory: topic_outcomes (telemetry only)
+                topic = post.get('type', 'general')
+                if topic not in self.memory.topic_outcomes:
+                    self.memory.topic_outcomes[topic] = {'total_er': 0.0, 'count': 0}
+                self.memory.topic_outcomes[topic]['total_er'] += er
+                self.memory.topic_outcomes[topic]['count'] += 1
 
-                    # Auto-update post_strategies weights on 24h check
-                    if delay > 21600 and self.memory.topic_outcomes:
-                        self._update_strategy_weights_from_memory()
-                    break
+                if er > 10:
+                    logger.info(f"🎯 Успешный пост! Вовлеченность: {er}")
+
+                # Dual-credit on 6h/24h (idempotent via rewarded_checks)
+                if check_id in ('6h', '24h'):
+                    strategy_key = post.get('strategy_key')
+                    rewarded = post.setdefault('rewarded_checks', [])
+                    memory_dirty = False
+                    if (
+                        strategy_key
+                        and post.get('type') != 'comment'
+                        and check_id not in rewarded
+                    ):
+                        credited = self.policy_learner.credit(
+                            strategy_key,
+                            post['likes'],
+                            post['reposts'],
+                            post['replies'],
+                            check_id,
+                        )
+                        if credited:
+                            rewarded.append(check_id)
+                            self.policy_learner.sync_config_weights(
+                                self._config_path
+                            )
+                            self.config['post_strategies'] = (
+                                self.policy_learner.export_weights()
+                            )
+                            self.policy_learner.save()
+                            memory_dirty = True
+                            logger.info(
+                                "🧠 PolicyLearner credit %s arm=%s likes=%s "
+                                "reposts=%s replies=%s",
+                                check_id,
+                                strategy_key,
+                                post['likes'],
+                                post['reposts'],
+                                post['replies'],
+                            )
+
+                    # FormatBandit credit (separate format_rewarded_checks)
+                    if (
+                        self.format_bandit is not None
+                        and ab_fmt
+                        and post.get('type') != 'comment'
+                    ):
+                        fmt_rewarded = post.setdefault(
+                            'format_rewarded_checks', []
+                        )
+                        if check_id not in fmt_rewarded:
+                            fmt_ok = self.format_bandit.credit(
+                                ab_fmt,
+                                post['likes'],
+                                post['reposts'],
+                                post['replies'],
+                                check_id,
+                            )
+                            if fmt_ok:
+                                fmt_rewarded.append(check_id)
+                                self.format_bandit.save()
+                                memory_dirty = True
+                                logger.info(
+                                    "🧠 FormatBandit credit %s arm=%s likes=%s "
+                                    "reposts=%s replies=%s",
+                                    check_id,
+                                    ab_fmt,
+                                    post['likes'],
+                                    post['reposts'],
+                                    post['replies'],
+                                )
+
+                    if memory_dirty:
+                        self.memory.save()
+                break
 
         except Exception as e:
             logger.error(f"Ошибка анализа производительности: {e}")
 
-    def _update_strategy_weights_from_memory(self) -> None:
-        """Корректирует веса post_strategies по topic_outcomes (LEARN-001)."""
-        apply_strategy_weights_from_outcomes(
-            self.memory.topic_outcomes, self.config
-        )
-    
     async def maintain_rate_limits(self) -> None:
         """Управление rate limits"""
         # Отслеживаем количество операций
@@ -2363,42 +2846,36 @@ class AutonomousBlueskyBotV2:
         return await self.follow_strategy_orchestrator.from_timeline()
 
     def learn_from_memory(self) -> None:
-        """Обучение на основе накопленной памяти"""
+        """PolicyLearner tick: soft-decay + occasional report (no content_performance)."""
         try:
-            # Анализируем успешные посты
-            if len(self.memory.successful_posts) > 10:
-                # Находим паттерны успешного контента
-                successful_types = [post.get('type', 'general') for post in self.memory.successful_posts]
-                type_counter = Counter(successful_types)
-                
-                # Обновляем весы типов контента
-                total_posts = len(self.memory.successful_posts)
-                for content_type, count in type_counter.items():
-                    success_rate = count / total_posts
-                    self.memory.content_performance[content_type] = success_rate
-                
-                logger.info(f"📈 Обновлены весы контента: {dict(type_counter.most_common(3))}")
-            
-            # Анализируем паттерны взаимодействий
-            if self.memory.user_relationships:
-                # Безопасное получение оценок с проверкой наличия ключа
-                total_score = 0
-                valid_relationships = 0
-                
-                for rel in self.memory.user_relationships.values():
-                    if isinstance(rel, dict):
-                        # БЕЗОПАСНО получаем score с fallback на 0.0
-                        score_value = rel.get('score', 0.0)
-                        total_score += score_value
-                        valid_relationships += 1
-                
-                if valid_relationships > 0:
-                    avg_score = total_score / valid_relationships
-                    self.memory.interaction_patterns['avg_relationship_score'] = avg_score
-                    logger.info(f"🤝 Средний балл отношений: {avg_score:.2f}")
-            
+            pl = self.policy_learner
+            pl.maybe_decay()
+            if pl.cycle_count % 10 == 0:
+                report_path = pl.write_report()
+                snap = pl.report()
+                logger.info(
+                    "📊 PolicyLearner cycle=%s credit_mass=%.2f report=%s",
+                    snap.get('cycle_count'),
+                    float(snap.get('total_credit_mass') or 0.0),
+                    report_path,
+                )
+            pl.save()
         except Exception as e:
-            logger.error(f"Ошибка обучения: {e}")
+            logger.error(f"Ошибка PolicyLearner tick: {e}")
+        try:
+            fb = getattr(self, "format_bandit", None)
+            if fb is not None:
+                fb.maybe_decay()
+                fb.save()
+        except Exception as e:
+            logger.error(f"Ошибка FormatBandit tick: {e}")
+        try:
+            eng = getattr(self, "engagement_learner", None)
+            if eng and eng.enabled:
+                eng.maybe_decay()
+                eng.save()
+        except Exception as e:
+            logger.error(f"Ошибка EngagementLearner tick: {e}")
 
     async def upload_image_to_bluesky(self, image_url: str) -> Optional[Dict]:
         """Download image + upload_blob via ``retry_media_upload`` (RETRY-003)."""

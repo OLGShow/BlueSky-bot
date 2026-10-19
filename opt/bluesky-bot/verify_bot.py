@@ -23,6 +23,7 @@ Tests:
  18. VER-001 consolidated acceptance (ignore + session + pickle) [S2][S3][S4]
  19. REF-001 PostStrategy helper (_quality_theme_post) via AST (hermetic)
  20. SMOKE-001 post-deploy hermetic smoke (imports, config, DRY_RUN, fail-fast)
+ 21. PLRN-008 learning smoke (PolicyLearner ×3 domains + AgentDecisionLog, tmpdir)
 
 Run:
   python verify_bot.py              # full hardening suite
@@ -339,6 +340,80 @@ def test_smoke_smoke001():
     run_smoke001_assertions(include_live=False)
 
 
+@test("PLRN-008: PolicyLearner domains + AgentDecisionLog (tmpdir, no network)")
+def test_smoke_learning_plrn008():
+    """Hermetic learning smoke: strategy/format/engagement pick+credit + one log line.
+
+    Deploy checklist (ops): writable learning_state_*.json under WorkingDirectory,
+    restart service after deploy, journalctl for domain pick/credit lines.
+    Full checklist: ai_docs/develop/reports/2026-10-19-learning-deploy-checklist.md
+    """
+    from agent_decision_log import AgentDecisionLog
+    from policy_learner import FORMAT_ARM_KEYS, PolicyLearner
+
+    tmpdir = tempfile.mkdtemp(prefix="plrn008_smoke_")
+    try:
+        params = {
+            "reward_scale": 10,
+            "credit_weight_6h": 0.35,
+            "credit_weight_24h": 0.65,
+            "epsilon": 0.10,
+            "max_arm_share_24h": 0.40,
+            "warm_start_strength": 4,
+        }
+        domains = (
+            (
+                "strategy",
+                os.path.join(tmpdir, "learning_state.json"),
+                ["theme_a", "theme_b"],
+                {"theme_a": 0.5, "theme_b": 0.5},
+            ),
+            (
+                "format",
+                os.path.join(tmpdir, "learning_state_format.json"),
+                list(FORMAT_ARM_KEYS),
+                {"format_a": 0.5, "format_b": 0.5},
+            ),
+            (
+                "engagement",
+                os.path.join(tmpdir, "learning_state_engagement.json"),
+                ["ai", "other"],
+                {"ai": 0.5, "other": 0.5},
+            ),
+        )
+        for domain, path, arms, boot in domains:
+            learner = PolicyLearner.load(
+                path=path,
+                params=params,
+                arm_keys=arms,
+                bootstrap_weights=boot,
+            )
+            picked = learner.pick_arm(arms, [])
+            assert picked in arms, f"{domain}: pick {picked!r} not in {arms}"
+            learner.record_pick(picked)
+            ok = learner.credit(picked, likes=2, reposts=1, replies=0, check_id="6h")
+            assert ok is True, f"{domain}: credit failed for {picked}"
+            learner.save()
+            assert os.path.isfile(path), f"{domain}: state not written at {path}"
+
+        log_path = os.path.join(tmpdir, "agent_decisions.jsonl")
+        decision_log = AgentDecisionLog(path=log_path, max_lines=100)
+        decision_log.log(
+            domain="strategy",
+            action="pick",
+            arm="theme_a",
+            reason="thompson",
+            context={"smoke": True},
+        )
+        assert os.path.isfile(log_path), "decision log file missing"
+        recent = decision_log.recent(1)
+        assert len(recent) == 1, f"expected 1 log line, got {len(recent)}"
+        assert recent[0].get("domain") == "strategy"
+        assert recent[0].get("arm") == "theme_a"
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 # --- 8. SingleInstanceLock ---
 
 @test("SingleInstanceLock: acquire + release + stale detection")
@@ -527,6 +602,7 @@ def test_scheduling():
 _SMOKE_TEST_NAMES = (
     "test_imports",
     "test_smoke_smoke001",
+    "test_smoke_learning_plrn008",
 )
 
 

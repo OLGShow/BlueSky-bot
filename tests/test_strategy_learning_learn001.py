@@ -90,22 +90,13 @@ class TestComputeUpdatedStrategyWeights(unittest.TestCase):
             updated_low["_create_viral_hot_take"], WEIGHT_MIN
         )
 
-    def test_apply_mutates_config(self) -> None:
-        from strategy_learning import apply_strategy_weights_from_outcomes
+    def test_apply_function_removed(self) -> None:
+        """PLRN-007: apply_* dual-writer deleted; compute helpers remain."""
+        import strategy_learning as sl
 
-        config = {
-            "post_strategies": {
-                "_create_viral_hot_take": 0.2,
-                "_create_trending_commentary": 0.2,
-            }
-        }
-        outcomes = {
-            "viral hot take": {"total_er": 30.0, "count": 1},
-            "trending commentary": {"total_er": 1.0, "count": 1},
-        }
-        changed = apply_strategy_weights_from_outcomes(outcomes, config)
-        self.assertTrue(changed)
-        self.assertIn("_create_viral_hot_take", config["post_strategies"])
+        self.assertFalse(hasattr(sl, "apply_strategy_weights_from_outcomes"))
+        self.assertTrue(hasattr(sl, "compute_updated_strategy_weights"))
+        self.assertEqual(sl.WEIGHT_MIN, 0.05)
 
 
 if __name__ == "__main__":

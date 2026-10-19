@@ -124,6 +124,7 @@ class ABEngine:
             self.results.setdefault(k, {'impressions': 0, 'total_er_1h': 0.0, 'total_er_6h': 0.0, 'total_er_24h': 0.0})
 
     def pick_format(self) -> str:
+        """Legacy ε-greedy pick; prefer FormatBandit (PolicyLearner) when enabled."""
         total = sum(v['impressions'] for v in self.results.values())
         if total < 10:
             import random

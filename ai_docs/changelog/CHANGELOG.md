@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Autonomous learning agent Wave 1+2: Thompson `PolicyLearner` (strategy) + FormatBandit + `EngagementLearner` + `AgentDecisionLog` (PLRN); report [autonomous-learning-agent](../develop/reports/2026-10-19-autonomous-learning-agent.md); [ADR-002](../develop/architecture/ADR-002-policy-learner-bandit.md); deploy [checklist](../develop/reports/2026-10-19-learning-deploy-checklist.md)
 - Thin bot shell: `relevance_scoring.py`, `follow_strategy.py`, `rss_content.py` (REL/FOL/RSS-001); architecture evening re-score **7.5/10**
 - Hermetic suites: `test_relevance_scoring_rel001`, `test_follow_strategy_fol001`, `test_rss_content_rss001`
 - Phase 7 leftovers: `heartbeat_monitor.py`, `engagement_cache_sync.py`, `smart_engagement.py`, `daily_reporting.py` (HB/CACHE/ENG/DRY)
@@ -36,6 +37,7 @@
 - Audit deferred/FP tracking: [ISS-001](../develop/issues/ISS-001-audit-deferred-fp-findings.md)
 
 ### Changed
+- Strategy learning: stub SEAL + LEARN-001 apply replaced by `PolicyLearner` bandit (sole `post_strategies` writer); format pick prefers FormatBandit over `ABEngine` ε-greedy
 - Formatter / rich_posts use injected shared `ClientSession` (HTTP-002); Phase 6 shared-HTTP complete for AI + post formatters
 - ATProto + media upload paths use `retry_atproto` / `retry_media_upload` via `RetryPolicy.execute` (RETRY-003); Phase 4 outbound retry complete for catalogued I/O
 - OpenRouter / Pollinations use injected shared `ClientSession` + `RetryPolicy.execute`; RSS GET via `_http_get_text_with_retry` (RETRY-002 / HTTP-001)

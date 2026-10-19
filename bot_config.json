@@ -175,5 +175,34 @@
     "timezone": "UTC",
     "active_windows": [],
     "quiet_hours": []
+  },
+  "learning_parameters": {
+    "reward_scale": 10,
+    "credit_weight_6h": 0.35,
+    "credit_weight_24h": 0.65,
+    "min_settled_posts": 5,
+    "max_arm_share_24h": 0.40,
+    "novelty_idle_days": 14,
+    "novelty_bonus": 0.15,
+    "epsilon": 0.10,
+    "decay_every_cycles": 20,
+    "decay_rate": 0.005,
+    "weight_min": 0.05,
+    "warm_start_strength": 4,
+    "deltas_max": 20,
+    "state_path": "learning_state.json"
+  },
+  "format_learning": {
+    "enabled": true,
+    "max_arm_share_24h": 0.70,
+    "epsilon": 0.15,
+    "state_path": "learning_state_format.json"
+  },
+  "engagement_learning": {
+    "enabled": true,
+    "max_arm_share_24h": 0.40,
+    "epsilon": 0.10,
+    "state_path": "learning_state_engagement.json",
+    "action_credit_delays_hours": [6, 24]
   }
 }

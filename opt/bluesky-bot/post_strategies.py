@@ -12,8 +12,10 @@ extraction from ``AutonomousBlueskyBotV2``.
   overwrite extracted families (e.g. ``QualityNewsStrategy`` under
   ``_create_quality_news_post``) so the registry prefers strategy instances
 - Runtime dispatch: ``create_scheduled_post`` uses
-  ``registry.weighted_entries(config)``; duplicate-fallback uses
-  ``registry.resolve(name)`` (getattr only for names not in config)
+  ``registry.weighted_named_entries(config)`` (name + callable + weight);
+  ``weighted_entries`` remains for callers that only need callables;
+  duplicate-fallback uses ``registry.resolve(name)`` (getattr only for
+  names not in config)
 - Learning / A/B keys stay the config **name strings** (stable)
 
 **How to extract more families:**
@@ -155,6 +157,28 @@ class PostStrategyRegistry:
     def __len__(self) -> int:
         return len(self._strategies)
 
+    def weighted_named_entries(
+        self,
+        weights: Mapping[str, float],
+        *,
+        skip_missing: bool = True,
+    ) -> List[Tuple[str, PostStrategyFn, float]]:
+        """Build ``[(name, callable, weight), ...]`` from a config weight map.
+
+        Missing names are skipped when ``skip_missing`` is True (default);
+        otherwise :class:`StrategyLookupError` is raised. Used by
+        ``create_scheduled_post`` so the config key can be persisted as
+        ``strategy_key`` on successful posts.
+        """
+        entries: List[Tuple[str, PostStrategyFn, float]] = []
+        for name, weight in weights.items():
+            if name not in self._strategies:
+                if skip_missing:
+                    continue
+                raise StrategyLookupError(name)
+            entries.append((name, self.resolve(name), float(weight)))
+        return entries
+
     def weighted_entries(
         self,
         weights: Mapping[str, float],
@@ -163,18 +187,30 @@ class PostStrategyRegistry:
     ) -> List[Tuple[PostStrategyFn, float]]:
         """Build ``[(callable, weight), ...]`` from a config weight map.
 
+        Delegates to :meth:`weighted_named_entries` and drops names.
         Missing names are skipped when ``skip_missing`` is True (default);
-        otherwise :class:`StrategyLookupError` is raised. Used by
-        ``create_scheduled_post`` for weighted strategy dispatch.
+        otherwise :class:`StrategyLookupError` is raised.
         """
-        entries: List[Tuple[PostStrategyFn, float]] = []
-        for name, weight in weights.items():
-            if name not in self._strategies:
-                if skip_missing:
-                    continue
-                raise StrategyLookupError(name)
-            entries.append((self.resolve(name), float(weight)))
-        return entries
+        return [
+            (fn, weight)
+            for _, fn, weight in self.weighted_named_entries(
+                weights, skip_missing=skip_missing
+            )
+        ]
+
+
+def successful_post_bandit_fields(strategy_key: str) -> Dict[str, Any]:
+    """Initial PolicyLearner fields stored on a newly published post.
+
+    Metrics start as ``None`` so credit skips until a real API fetch.
+    """
+    return {
+        "strategy_key": strategy_key,
+        "rewarded_checks": [],
+        "likes": None,
+        "reposts": None,
+        "replies": None,
+    }
 
 
 def register_bound_methods(

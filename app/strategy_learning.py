@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
-"""Strategy weight updates from topic outcomes — Phase 7 / LEARN-001.
+"""Legacy LEARN-001 helpers (compute-only).
 
-Pure application logic extracted from
-``AutonomousBlueskyBotV2._update_strategy_weights_from_memory``.
+Runtime strategy weights are owned by ``PolicyLearner`` (PLRN-005+).
+``apply_strategy_weights_from_outcomes`` was removed — do not reintroduce
+dual writers. Constants / ``compute_updated_strategy_weights`` kept for
+tests and offline analysis only.
 
 Import rules:
 - Must not import ``bluesky_bot_v2``.
-- Bot remains composition root; call site stays in delayed performance check.
 """
 
 from __future__ import annotations
 
-import logging
-from typing import Any, Dict, Mapping, MutableMapping, Optional, Tuple
-
-logger = logging.getLogger(__name__)
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 WEIGHT_MIN = 0.05
 WEIGHT_MAX = 0.50
@@ -59,11 +57,7 @@ def compute_updated_strategy_weights(
 ) -> Tuple[Dict[str, float], bool]:
     """Return updated weights and whether any weight changed.
 
-    Behavior parity with the former bot method:
-    - empty outcomes → no-op (unchanged copy, ``changed=False``)
-    - above-average topic ER → weight * (1 + delta)
-    - below-average → weight * (1 - delta)
-    - clamp to ``[weight_min, weight_max]``, round to 3 decimals
+    Offline/helper only — not used by the live bot credit path.
     """
     if not topic_outcomes:
         return dict(post_strategies), False
@@ -90,29 +84,3 @@ def compute_updated_strategy_weights(
             changed = True
 
     return updated, changed
-
-
-def apply_strategy_weights_from_outcomes(
-    topic_outcomes: Mapping[str, Mapping[str, Any]],
-    config: MutableMapping[str, Any],
-) -> bool:
-    """Mutate ``config['post_strategies']`` from outcomes; return if changed."""
-    try:
-        outcomes = topic_outcomes or {}
-        if not outcomes:
-            return False
-        strategies_config = dict(config.get("post_strategies", {}) or {})
-        if not strategies_config:
-            return False
-        updated, changed = compute_updated_strategy_weights(
-            outcomes, strategies_config
-        )
-        if changed:
-            config["post_strategies"] = updated
-            logger.info(
-                "🔄 post_strategies обновлены по A/B данным: %s", updated
-            )
-        return changed
-    except Exception as e:
-        logger.warning("⚠️ Ошибка обновления весов стратегий: %s", e)
-        return False

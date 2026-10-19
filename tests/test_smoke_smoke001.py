@@ -52,7 +52,9 @@ KEY_MODULES: Sequence[str] = (
     "content_service",
     "growth_engine",
     "http_session",
-    "bot_learning_module",
+    "policy_learner",
+    "engagement_learner",
+    "agent_decision_log",
     "rss_source_manager",
 )
 
@@ -60,6 +62,9 @@ REQUIRED_CONFIG_KEYS: Sequence[str] = (
     "post_strategies",
     "bluesky_limits",
     "engagement_settings",
+    "learning_parameters",
+    "format_learning",
+    "engagement_learning",
 )
 
 _TRUTHY_DRY_RUN = ("true", "1", "yes", "TRUE", "Yes")

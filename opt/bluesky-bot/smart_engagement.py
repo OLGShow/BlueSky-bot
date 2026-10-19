@@ -14,7 +14,7 @@ import asyncio
 import logging
 import random
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import (
     Any,
     Awaitable,
@@ -106,6 +106,10 @@ class SmartEngagementPorts:
     get_session_likes: Callable[[], int]
     bump_errors: Callable[[], None]
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+    # PLRN-011: optional topic bandit multipliers + like ledger callback
+    infer_topic: Optional[Callable[[str], str]] = None
+    topic_multiplier: Optional[Callable[[str], float]] = None
+    on_like_action: Optional[Callable[..., None]] = None
 
 
 @dataclass
@@ -276,16 +280,25 @@ class SmartEngagementOrchestrator:
                 if interactions >= cfg.max_interactions:
                     break
 
+                topic: Optional[str] = None
+                effective = float(relevance_score)
+                if ports.topic_multiplier and ports.infer_topic:
+                    topic = ports.infer_topic(text)
+                    effective = float(relevance_score) * float(
+                        ports.topic_multiplier(topic)
+                    )
+
                 author_handle = getattr(post.post.author, "handle", "unknown")
                 logger.info(
-                    "🔍 @%s: score=%.2f | %s%s",
+                    "🔍 @%s: score=%.2f eff=%.2f | %s%s",
                     author_handle,
                     relevance_score,
+                    effective,
                     text[:80],
                     "..." if len(text) > 80 else "",
                 )
 
-                if relevance_score < cfg.like_threshold:
+                if effective < cfg.like_threshold:
                     continue
 
                 high_relevance_posts += 1
@@ -294,17 +307,38 @@ class SmartEngagementOrchestrator:
                     liked = await ports.like(
                         uri=post.post.uri,
                         cid=post.post.cid,
-                        score=relevance_score,
+                        score=effective,
                         author_did=author_did,
                         author_handle=author_handle,
                     )
                     if liked:
                         interactions += 1
                         logger.info("❤️ Лайк поставлен!")
+                        if ports.on_like_action:
+                            try:
+                                mult = 1.0
+                                if ports.topic_multiplier and topic:
+                                    mult = float(
+                                        ports.topic_multiplier(topic)
+                                    )
+                                ports.on_like_action(
+                                    kind="like",
+                                    topic=topic or "_other",
+                                    uri=post.post.uri,
+                                    ts=datetime.now(timezone.utc).isoformat(),
+                                    rewarded_checks=[],
+                                    multiplier=mult,
+                                    score=float(relevance_score),
+                                    effective_score=float(effective),
+                                )
+                            except Exception as cb_err:
+                                logger.warning(
+                                    "on_like_action failed: %s", cb_err
+                                )
                         await ports.sleep(random.uniform(3, 7))
 
                     if (
-                        relevance_score >= repost_threshold
+                        effective >= repost_threshold
                         and reposts_made < cfg.max_reposts
                         and random.random() < cfg.repost_probability
                         and post.post.uri not in ports.reposted_uris
@@ -328,14 +362,14 @@ class SmartEngagementOrchestrator:
                             reposted = await ports.repost(
                                 uri=post.post.uri,
                                 cid=post.post.cid,
-                                score=relevance_score,
+                                score=effective,
                                 author_did=author_did,
                             )
                             if reposted:
                                 reposts_made += 1
                                 logger.info(
                                     "🔄 Репост выполнен! (score=%.2f, #%s/%s)",
-                                    relevance_score,
+                                    effective,
                                     reposts_made,
                                     cfg.max_reposts,
                                 )
@@ -347,7 +381,7 @@ class SmartEngagementOrchestrator:
 
                     if author_did:
                         ports.update_relationship(
-                            author_did, "engagement", relevance_score
+                            author_did, "engagement", effective
                         )
 
                 except Exception as e:

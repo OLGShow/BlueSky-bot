@@ -267,19 +267,22 @@ class TestScheduledPostUsesPipeline(unittest.TestCase):
     """AST guard: create_scheduled_post calls unified pipeline entry."""
 
     def test_create_scheduled_post_uses_regenerate_until_quality(self):
-        src = (APP_DIR / "bluesky_bot_v2.py").read_text(
+        bot_src = (APP_DIR / "bluesky_bot_v2.py").read_text(
             encoding="utf-8", errors="replace"
         )
-        self.assertIn("regenerate_until_quality", src)
-        self.assertIn("quality_pipeline", src)
-        # Dual raw gate.check loop should not remain in create path
-        # (method may still reference quality_gate for composition)
-        create_idx = src.find("async def create_scheduled_post")
-        next_def = src.find("\n    def ", create_idx + 1)
+        orch_src = (APP_DIR / "publish_orchestrator.py").read_text(
+            encoding="utf-8", errors="replace"
+        )
+        self.assertIn("publish_orchestrator.run", bot_src)
+        self.assertIn("regenerate_until_quality", orch_src)
+        self.assertIn("quality_pipeline", orch_src)
+        # Dual raw gate.check loop should not remain in publish path
+        run_idx = orch_src.find("async def run(self)")
+        next_def = orch_src.find("\n    def ", run_idx + 1)
         if next_def < 0:
-            next_def = src.find("\n    async def ", create_idx + 1)
-        body = src[create_idx:next_def]
-        self.assertNotIn("self.quality_gate.check(", body)
+            next_def = orch_src.find("\n    async def ", run_idx + 1)
+        body = orch_src[run_idx:next_def] if next_def > 0 else orch_src[run_idx:]
+        self.assertNotIn("quality_gate.check(", body)
         self.assertIn("regenerate_until_quality(", body)
 
 

@@ -27,11 +27,23 @@ def _bot_source() -> str:
     return BOT_PATH.read_text(encoding="utf-8")
 
 
-def _create_scheduled_post_body(src: str) -> str:
-    marker = "async def create_scheduled_post"
+def _publish_run_body() -> str:
+    path = APP_DIR / "publish_orchestrator.py"
+    src = path.read_text(encoding="utf-8")
+    marker = "async def run(self)"
     start = src.find(marker)
-    assert start >= 0, "create_scheduled_post not found"
-    # next top-level method at same indent after this def
+    assert start >= 0, "ScheduledPostPublisher.run not found"
+    rest = src[start:]
+    m = re.search(r"\n    (?:async )?def |\nclass ", rest[1:])
+    end = (m.start() + 1) if m else len(rest)
+    return rest[:end]
+
+
+def _build_publish_ports_body() -> str:
+    src = _bot_source()
+    marker = "def _build_publish_ports"
+    start = src.find(marker)
+    assert start >= 0, "_build_publish_ports not found"
     rest = src[start:]
     m = re.search(r"\n    (?:async )?def |\nclass ", rest[1:])
     end = (m.start() + 1) if m else len(rest)
@@ -57,21 +69,26 @@ class TestBotAstGuards:
         assert "_update_strategy_weights_from_memory" not in src
 
     def test_no_topic_boost_in_create_scheduled_post(self) -> None:
-        body = _create_scheduled_post_body(_bot_source())
+        body = _publish_run_body()
         assert "1.3" not in body
         assert "Audience memory" not in body
 
     def test_create_scheduled_post_uses_pick_arm(self) -> None:
-        body = _create_scheduled_post_body(_bot_source())
-        assert "policy_learner.pick_arm" in body
-        assert "record_pick" in body
-        assert "post_strategy_registry.resolve" in body
+        run_body = _publish_run_body()
+        wire = _build_publish_ports_body()
+        assert "pick_strategy" in run_body
+        assert "record_strategy_pick" in run_body
+        assert "resolve_strategy" in run_body
+        assert "policy_learner.pick_arm" in wire
+        assert "record_pick" in wire
+        assert "post_strategy_registry.resolve" in wire
 
     def test_policy_learner_import_present(self) -> None:
         src = _bot_source()
+        orch = (APP_DIR / "publish_orchestrator.py").read_text(encoding="utf-8")
         assert "from policy_learner import" in src
         assert "PolicyLearner" in src
-        assert "recent_strategy_keys_24h" in src
+        assert "recent_strategy_keys_24h" in orch
         assert "eligible_catch_up_checks" in src
 
 

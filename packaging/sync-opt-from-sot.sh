@@ -32,6 +32,7 @@ PYFILES=(
     bluesky_post_formatter.py
     bluesky_rich_posts.py
     agent_decision_log.py
+    auth_service.py
     bot_cycle.py
     bot_monitor.py
     content_ports.py
@@ -46,8 +47,12 @@ PYFILES=(
     follow_strategy.py
     follower_tracker.py
     growth_engine.py
+    health_service.py
     heartbeat_monitor.py
+    media_service.py
     post_strategies.py
+    publish_orchestrator.py
+    publish_ports.py
     http_session.py
     log_sanitizer.py
     learning_orchestrator.py

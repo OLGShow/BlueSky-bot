@@ -53,10 +53,23 @@ def _bot_source() -> str:
     return BOT_PATH.read_text(encoding="utf-8")
 
 
-def _create_scheduled_post_body(src: str) -> str:
-    marker = "async def create_scheduled_post"
+def _publish_orchestrator_run_body() -> str:
+    path = APP_DIR / "publish_orchestrator.py"
+    src = path.read_text(encoding="utf-8")
+    marker = "async def run(self)"
     start = src.find(marker)
-    assert start >= 0, "create_scheduled_post not found"
+    assert start >= 0, "ScheduledPostPublisher.run not found"
+    rest = src[start:]
+    m = re.search(r"\n    (?:async )?def |\nclass ", rest[1:])
+    end = (m.start() + 1) if m else len(rest)
+    return rest[:end]
+
+
+def _build_publish_ports_body() -> str:
+    src = _bot_source()
+    marker = "def _build_publish_ports"
+    start = src.find(marker)
+    assert start >= 0, "_build_publish_ports not found"
     rest = src[start:]
     m = re.search(r"\n    (?:async )?def |\nclass ", rest[1:])
     end = (m.start() + 1) if m else len(rest)
@@ -96,12 +109,14 @@ class TestBotWiresFormatBandit:
         assert "PolicyLearner.load" in orch
 
     def test_create_scheduled_post_delegates_to_format_bandit(self) -> None:
-        body = _create_scheduled_post_body(_bot_source())
-        assert "format_bandit.pick_arm" in body
-        assert "format_bandit.record_pick" in body
-        assert "recent_format_keys_24h" in body
-        assert "get_prompt_suffix" in body
-        assert "format_rewarded_checks" in body
+        run_body = _publish_orchestrator_run_body()
+        wire = _build_publish_ports_body()
+        assert "recent_format_keys_24h" in run_body
+        assert "pick_format_bandit" in run_body
+        assert "get_prompt_suffix" in run_body
+        assert "format_rewarded_checks" in run_body
+        assert "format_bandit.pick_arm" in wire
+        assert "format_bandit.record_pick" in wire
 
     def test_delayed_check_credits_format_bandit(self) -> None:
         body = _delayed_performance_check_body(_bot_source())

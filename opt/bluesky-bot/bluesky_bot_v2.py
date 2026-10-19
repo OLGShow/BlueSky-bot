@@ -27,12 +27,9 @@ import html
 import hashlib
 from dotenv import load_dotenv
 from policy_learner import (
-    FORMAT_ARM_KEYS,
     PolicyLearner,
     eligible_catch_up_checks,
     eligible_format_catch_up_checks,
-    recent_format_keys_24h,
-    recent_strategy_keys_24h,
 )
 from follower_tracker import delta_between
 from engagement_learner import eligible_engagement_catch_up_checks
@@ -85,7 +82,6 @@ from post_strategies import (
     PostStrategyRegistry,
     StrategyLookupError,
     build_bound_registry,
-    successful_post_bandit_fields,
 )
 from content_service import (
     ContentService,
@@ -103,9 +99,6 @@ from quality_pipeline import (
     QualityContext,
     QualityPipeline,
     QualityResult,
-    STAGE_GATE,
-    STAGE_SCORE,
-    regenerate_until_quality,
 )
 from url_safety import UnsafeURLError, validate_outbound_url
 from strategies.dynamic_posts import (
@@ -192,6 +185,11 @@ from smart_engagement import (
     SmartEngagementOrchestrator,
     SmartEngagementPorts,
 )
+from publish_ports import PublishPorts
+from publish_orchestrator import ScheduledPostPublisher
+from auth_service import AuthPorts, AuthService
+from media_service import MediaPorts, MediaService
+from health_service import HealthPorts, HealthService
 # Настройка логирования с абсолютным путем
 import sys
 
@@ -724,6 +722,14 @@ class AutonomousBlueskyBotV2:
         )
         # Phase 7: one-tick cycle runner (CYCLE-001)
         self.bot_cycle_runner = BotCycleRunner(self._build_bot_cycle_ports())
+        # Scheduled publish orchestration (slice A)
+        self.publish_orchestrator = ScheduledPostPublisher(
+            self._build_publish_ports()
+        )
+        # Thin-shell: auth / media / health
+        self.auth_service = AuthService(self._build_auth_ports())
+        self.media_service = MediaService(self._build_media_ports())
+        self.health_service = HealthService(self._build_health_ports())
         if self.dry_run:
             logger.info("🧪 DRY-RUN режим: никакие действия не будут выполнены")
 
@@ -1001,6 +1007,180 @@ class AutonomousBlueskyBotV2:
             self._spawn_background(
                 self.delayed_engagement_credit_check(uri, delay_s)
             )
+
+    def _build_auth_ports(self) -> AuthPorts:
+        """Composition-root wiring: bot attrs → AuthPorts (no service→bot)."""
+
+        async def _restore_login(session: str):
+            return await self._atproto_execute(
+                self.bluesky_client.login, session_string=session
+            )
+
+        async def _credential_login():
+            return await self._atproto_execute(
+                self.bluesky_client.login, self.handle, self.password
+            )
+
+        return AuthPorts(
+            ensure_http=self._ensure_http_session,
+            load_session=self.session_store.load,
+            clear_session=self.session_store.clear,
+            save_session=self.session_store.save,
+            restore_login=_restore_login,
+            credential_login=_credential_login,
+            export_session_string=self.bluesky_client.export_session_string,
+            set_authenticated=lambda v: setattr(self, "authenticated", bool(v)),
+            get_handle=lambda: self.handle,
+        )
+
+    def _build_media_ports(self) -> MediaPorts:
+        """Composition-root wiring: bot attrs → MediaPorts (no service→bot)."""
+        return MediaPorts(
+            ensure_http=self._ensure_http_session,
+            get_http_session=lambda: self.http_session,
+            media_upload_execute=self._media_upload_execute,
+            upload_blob=self.bluesky_client.upload_blob,
+            validate_outbound_url=validate_outbound_url,
+            create_post=self.formatter.create_post,
+            bump_errors=lambda: self.session_stats.__setitem__(
+                "errors", self.session_stats.get("errors", 0) + 1
+            ),
+        )
+
+    def _build_health_ports(self) -> HealthPorts:
+        """Composition-root wiring: bot attrs → HealthPorts (no service→bot)."""
+
+        def _memory_mb() -> float:
+            try:
+                import psutil
+
+                return psutil.Process().memory_info().rss / 1024 / 1024
+            except ImportError:
+                logger.warning("⚠️ psutil не установлен, мониторинг памяти недоступен")
+                return 0.0
+
+        async def _reinit_http():
+            await self._ensure_http_session(force_recreate=True)
+
+        return HealthPorts(
+            get_http_session=lambda: self.http_session,
+            get_memory_mb=_memory_mb,
+            get_successful_posts=lambda: self.memory.successful_posts,
+            get_likes_given=lambda: int(self.session_stats.get("likes_given", 0)),
+            cleanup_content_hashes=self._cleanup_old_content_hashes,
+            cleanup_commented_posts=self._cleanup_old_commented_posts,
+            reinit_http=_reinit_http,
+            create_emergency_post=self._create_emergency_unique_post,
+            authenticate=self.authenticate,
+            save_memory=self.memory.save,
+        )
+
+    def _build_publish_ports(self) -> PublishPorts:
+        """Composition-root wiring: bot attrs → PublishPorts (no orchestrator→bot)."""
+
+        async def _resolve_strategy(name: str):
+            return await self.post_strategy_registry.resolve(name)()
+
+        async def _send_post(post):
+            return await self._atproto_execute(
+                self.bluesky_client.send_post,
+                text=post.text,
+                facets=post.facets if post.facets else None,
+                embed=(
+                    post.embed
+                    if hasattr(post, "embed") and post.embed
+                    else None
+                ),
+                langs=(
+                    post.langs
+                    if hasattr(post, "langs") and post.langs
+                    else ["en"]
+                ),
+            )
+
+        return PublishPorts(
+            safety_status=self._safety_status,
+            can_spend_post=lambda: self.activity_budget.can_spend("post"),
+            spend_post=lambda: self.activity_budget.spend("post"),
+            get_daily_post_count=lambda: int(self.daily_post_count),
+            set_daily_post_count=lambda n: setattr(self, "daily_post_count", int(n)),
+            get_max_posts_per_day=lambda: int(self.max_posts_per_day),
+            get_last_post_date=lambda: self.last_post_date,
+            set_last_post_date=lambda d: setattr(self, "last_post_date", d),
+            get_strategy_arm_keys=lambda: [
+                k
+                for k in self.config.get("post_strategies", {}).keys()
+                if k in self.post_strategy_registry
+            ],
+            get_successful_posts=lambda: self.memory.successful_posts,
+            has_format_bandit=lambda: self.format_bandit is not None,
+            pick_format_bandit=lambda arms, recent: self.format_bandit.pick_arm(
+                list(arms), recent
+            ),
+            record_format_pick=lambda arm: self.format_bandit.record_pick(arm),
+            get_format_bandit_learner=lambda: self.format_bandit,
+            pick_ab_format=lambda: self.ab_engine.pick_format(),
+            get_prompt_suffix=lambda fmt: self.ab_engine.get_prompt_suffix(fmt),
+            log_pick=self._log_bandit_pick,
+            set_current_ab_format=lambda fmt: setattr(
+                self, "_current_ab_format", fmt
+            ),
+            set_current_ab_suffix=lambda s: setattr(self, "_current_ab_suffix", s),
+            get_dry_run_format_label=lambda: getattr(
+                self, "_last_ab_format", "unknown"
+            ),
+            get_trend_timeline_snippets=lambda: getattr(
+                self, "_trend_timeline_snippets", []
+            ),
+            get_trend_rss_headlines=lambda: getattr(
+                self, "_trend_rss_headlines", []
+            ),
+            get_topic_of_day=lambda texts: self.trend_radar.get_topic_of_day(texts),
+            pick_strategy=lambda arms, recent: self.policy_learner.pick_arm(
+                list(arms), recent
+            ),
+            record_strategy_pick=lambda key: self.policy_learner.record_pick(key),
+            get_policy_learner=lambda: self.policy_learner,
+            set_current_strategy_key=lambda key: setattr(
+                self, "_current_strategy_key", key
+            ),
+            get_current_strategy_key=lambda: getattr(
+                self, "_current_strategy_key", None
+            ),
+            resolve_strategy=_resolve_strategy,
+            quality_pipeline=self.quality_pipeline,
+            set_quality_gate_regen_mode=lambda on: setattr(
+                self, "_quality_gate_regen_mode", bool(on)
+            ),
+            apply_quality_result=self._apply_quality_result_to_post,
+            is_duplicate=self._is_duplicate_content,
+            create_fallback=self._create_fallback_post_for_duplicate,
+            evaluate_quality=self._evaluate_post_quality,
+            enforce_text_limit=lambda post: self._enforce_bluesky_text_limit(
+                post, max_graphemes=BLUESKY_MAX_GRAPHEMES
+            ),
+            dry_run=bool(self.dry_run),
+            dry_run_log=lambda action, **kwargs: self.dry_run_log.log(
+                action, **kwargs
+            ),
+            send_post=_send_post,
+            mark_published=self._mark_content_as_published,
+            bump_posts_created=lambda: self.session_stats.__setitem__(
+                "posts_created",
+                self.session_stats.get("posts_created", 0) + 1,
+            ),
+            generate_content_hash=self._generate_content_hash,
+            append_successful_post=lambda data: self.memory.successful_posts.append(
+                data
+            ),
+            append_viral_post=lambda data: self.memory.viral_posts.append(data),
+            schedule_checks=self.content_service.schedule_post_performance_checks,
+            refresh_followers_at_publish=self.refresh_followers_count,
+            record_ab_impression=lambda fmt: self.ab_engine.record_impression(fmt),
+            bump_errors=lambda: self.session_stats.__setitem__(
+                "errors", self.session_stats.get("errors", 0) + 1
+            ),
+        )
 
     def _build_bot_cycle_ports(self) -> CallableBotCyclePorts:
         """Composition-root wiring: bot attrs → BotCyclePorts (CYCLE-001)."""
@@ -1450,299 +1630,19 @@ class AutonomousBlueskyBotV2:
         return await self.emergency_unique_strategy.create()
 
     async def authenticate(self, force_login: bool = False) -> bool:
-        """Session-first auth: restore persisted session, fallback to login.
-
-        Login uses ``retry_atproto`` (RETRY-003) — bounded retries; CLIENT short-circuits.
-        """
-        await self._ensure_http_session()
-
-        # --- Phase 1: try restoring a persisted session ---
-        if not force_login:
-            saved = self.session_store.load()
-            if saved:
-                try:
-                    profile = await self._atproto_execute(
-                        self.bluesky_client.login, session_string=saved
-                    )
-                    self.authenticated = True
-                    self._persist_session()
-                    logger.info(f"✅ Сессия восстановлена для {getattr(profile, 'handle', self.handle)}")
-                    return True
-                except Exception as e:
-                    logger.warning(f"⚠️ Не удалось восстановить сессию: {e}. Переход к login.")
-                    self.session_store.clear()
-
-        # --- Phase 2: full login via RetryPolicy (no ad-hoc sleep loop) ---
-        try:
-            await self._atproto_execute(
-                self.bluesky_client.login, self.handle, self.password
-            )
-            self.authenticated = True
-            self._persist_session()
-            logger.info(f"✅ Успешная авторизация: {self.handle}")
-            return True
-        except Exception as e:
-            ec = classify_error(e)
-            logger.error(f"❌ Ошибка авторизации ({ec.value}): {e}")
-            return False
+        """Thin delegate → :class:`AuthService`."""
+        return await self.auth_service.authenticate(force_login=force_login)
 
     def _persist_session(self) -> None:
-        try:
-            ss = self.bluesky_client.export_session_string()
-            if ss:
-                self.session_store.save(ss)
-        except Exception as e:
-            logger.warning(f"⚠️ Не удалось сохранить сессию: {e}")
-    
+        """Thin delegate → :meth:`AuthService.persist_session`."""
+        self.auth_service.persist_session()
+
     # НОВЫЕ МЕТОДЫ ДЛЯ КРАСИВЫХ ПОСТОВ
     
     async def create_scheduled_post(self) -> None:
-        """ИСПРАВЛЕННОЕ создание запланированного поста с контролем качества и динамическими весами"""
-        try:
-            # SafetyGovernor gate — pause publish on risk signals (PLRN-022)
-            _sg = self._safety_status()
-            if not _sg.can_publish:
-                logger.info(
-                    "🛡️ SafetyGovernor: publish blocked — %s",
-                    ", ".join(_sg.reasons) or "unknown",
-                )
-                return
+        """Thin delegate → :class:`ScheduledPostPublisher` (publish extract slice A)."""
+        await self.publish_orchestrator.run()
 
-            # Budget gate — check before any generation work
-            if not self.activity_budget.can_spend('post'):
-                logger.info("📊 Activity budget exhausted for posting — skipping cycle")
-                return
-
-            # Проверяем дневной лимит
-            current_date = datetime.now().date()
-            if current_date != self.last_post_date:
-                self.daily_post_count = 0
-                self.last_post_date = current_date
-            
-            if self.daily_post_count >= self.max_posts_per_day:
-                logger.info(f"📊 Достигнут дневной лимит постов ({self.max_posts_per_day}). Пропускаем.")
-                return
-            
-            # НИКОГДА НЕ СОЗДАЕМ THREAD АВТОМАТИЧЕСКИ
-            logger.info("🎨 Создание качественного поста...")
-            
-            # Strategy arms from config (PolicyLearner pick; registry must resolve)
-            strategies_config = self.config.get('post_strategies', {})
-            arm_keys = [
-                k for k in strategies_config.keys()
-                if k in self.post_strategy_registry
-            ]
-            if not arm_keys:
-                logger.error("❌ Не найдено ни одной валидной стратегии в конфигурации!")
-                return
-            
-            # FormatBandit pick (fallback: ABEngine ε-greedy when disabled)
-            if self.format_bandit is not None:
-                recent_formats = recent_format_keys_24h(
-                    self.memory.successful_posts
-                )
-                ab_format = self.format_bandit.pick_arm(
-                    list(FORMAT_ARM_KEYS), recent_formats
-                )
-                self.format_bandit.record_pick(ab_format)
-                self._log_bandit_pick(
-                    domain="format",
-                    action="pick_format",
-                    arm=ab_format,
-                    learner=self.format_bandit,
-                    context={"recent_24h": len(recent_formats)},
-                )
-            else:
-                ab_format = self.ab_engine.pick_format()
-                self._log_bandit_pick(
-                    domain="format",
-                    action="pick_format",
-                    arm=ab_format,
-                    reason="ab_engine",
-                )
-            self._current_ab_format = ab_format
-            self._current_ab_suffix = self.ab_engine.get_prompt_suffix(ab_format)
-            logger.info(f"🔬 A/B формат: {ab_format} | suffix len={len(self._current_ab_suffix)}")
-
-            # Trend Radar: topic of the day (telemetry / prompts only; no weight boost)
-            try:
-                trend_texts = [p.get('text', '')[:200] for p in self.memory.successful_posts[-50:]]
-                trend_texts += getattr(self, '_trend_timeline_snippets', [])
-                trend_texts += getattr(self, '_trend_rss_headlines', [])
-                trend_topic = self.trend_radar.get_topic_of_day(trend_texts)
-                if trend_topic:
-                    logger.info(f"📡 Trend Radar: тема дня = {trend_topic} (из {len(trend_texts)} текстов)")
-            except Exception:
-                pass
-
-            # Thompson pick → record → resolve (PLRN-005)
-            recent_keys = recent_strategy_keys_24h(self.memory.successful_posts)
-            strategy_key = self.policy_learner.pick_arm(arm_keys, recent_keys)
-            self.policy_learner.record_pick(strategy_key)
-            self._current_strategy_key = strategy_key
-            self._log_bandit_pick(
-                domain="strategy",
-                action="pick_strategy",
-                arm=strategy_key,
-                learner=self.policy_learner,
-                context={"recent_24h": len(recent_keys)},
-            )
-            post = await self.post_strategy_registry.resolve(strategy_key)()
-
-            # Unified quality pipeline (QUAL-002): gate regen + score, staged reasons
-            recent_texts = [p.get('text', '') for p in self.memory.successful_posts[-20:]]
-
-            async def _regen_weighted_strategy():
-                # Re-pick via PolicyLearner on quality regen (Phase A)
-                regen_key = self.policy_learner.pick_arm(arm_keys, recent_keys)
-                self.policy_learner.record_pick(regen_key)
-                self._current_strategy_key = regen_key
-                self._log_bandit_pick(
-                    domain="strategy",
-                    action="pick_strategy_regen",
-                    arm=regen_key,
-                    learner=self.policy_learner,
-                    context={"recent_24h": len(recent_keys)},
-                )
-                return await self.post_strategy_registry.resolve(regen_key)()
-
-            post, quality_result = await regenerate_until_quality(
-                post,
-                regenerate=_regen_weighted_strategy,
-                pipeline=self.quality_pipeline,
-                recent_posts=recent_texts,
-                set_regen_mode=lambda on: setattr(
-                    self, '_quality_gate_regen_mode', bool(on)
-                ),
-            )
-            if post and (
-                quality_result.ok or quality_result.stage == STAGE_SCORE
-            ):
-                self._apply_quality_result_to_post(post, quality_result)
-            if post and quality_result.ok:
-                logger.info(
-                    "✅ Quality pipeline passed (gate+score, stage=%s)",
-                    quality_result.stage,
-                )
-
-            if post and quality_result.ok:
-                # Проверяем на дубликаты еще раз перед публикацией
-                url = getattr(post, 'url', None) if hasattr(post, 'url') else None
-                image_url = getattr(post, 'image_url', None) if hasattr(post, 'image_url') else None
-                
-                if self._is_duplicate_content(post.text, url, image_url):
-                    logger.warning("🔄 Обнаружен дубликат перед публикацией. Создаем альтернативный контент...")
-                    # Создаем fallback пост вместо пропуска
-                    fallback_post = await self._create_fallback_post_for_duplicate()
-                    if fallback_post and self._evaluate_post_quality(fallback_post):
-                        post = fallback_post
-                        url = getattr(post, 'url', None) if hasattr(post, 'url') else None
-                        image_url = getattr(post, 'image_url', None) if hasattr(post, 'image_url') else None
-                        logger.info("✅ Создан альтернативный пост вместо дубликата")
-                    else:
-                        logger.warning("⚠️ Не удалось создать альтернативный пост. Пропускаем публикацию.")
-                        return
-                
-                # Публикуем (или dry-run) — outbound validation at publish boundary
-                try:
-                    post = self._enforce_bluesky_text_limit(
-                        post, max_graphemes=BLUESKY_MAX_GRAPHEMES
-                    )
-                except OutboundContentError as e:
-                    logger.warning(
-                        f"⚠️ Контент отклонён на границе публикации: {e}"
-                    )
-                    return
-                if self.dry_run:
-                    self.dry_run_log.log('send_post', text=post.text[:120], format=getattr(self, '_last_ab_format', 'unknown'))
-                    return
-
-                created = await self._atproto_execute(
-                    self.bluesky_client.send_post,
-                    text=post.text,
-                    facets=post.facets if post.facets else None,
-                    embed=post.embed if hasattr(post, 'embed') and post.embed else None,
-                    langs=post.langs if hasattr(post, 'langs') and post.langs else ['en'],
-                )
-                self.activity_budget.spend('post')
-                
-                self.ab_engine.record_impression(ab_format)
-                self._mark_content_as_published(post.text, url, image_url)
-
-                self.session_stats['posts_created'] += 1
-                self.daily_post_count += 1
-                logger.info(f"✅ Опубликован качественный пост #{self.daily_post_count}: {post.text[:80].replace(chr(10), ' ')}...")
-
-                followers_at_publish = await self.refresh_followers_count()
-                
-                # УЛУЧШЕННОЕ сохранение для анализа с вирусными метриками
-                content_hash = self._generate_content_hash(post.text, url, image_url)
-                strategy_key = self._current_strategy_key or strategy_key
-                post_data = {
-                    'text': post.text,
-                    'uri': created.uri,
-                    'created_at': datetime.now(),
-                    'timestamp': datetime.now().isoformat(),
-                    'type': getattr(post, 'content_type', 'general'),
-                    'quality_score': getattr(post, 'quality_score', 0.8),
-                    'content_hash': content_hash,
-                    'url': url,
-                    'image_url': image_url,
-                    'ab_format': ab_format,
-                    'format_rewarded_checks': [],
-                    # Вирусные метрики
-                    'viral_score': getattr(post, 'viral_score', 0.0),
-                    'viral_factors': getattr(post, 'viral_factors', []),
-                    'predicted_engagement': 0,
-                    'actual_engagement': 0,
-                    **successful_post_bandit_fields(strategy_key),
-                }
-                if followers_at_publish is not None:
-                    post_data['followers_at_publish'] = followers_at_publish
-                
-                self.memory.successful_posts.append(post_data)
-                
-                # НОВОЕ: Отслеживаем потенциально вирусные посты
-                if getattr(post, 'viral_score', 0.0) >= 0.6:
-                    self.memory.viral_posts.append({
-                        'uri': created.uri,
-                        'text': post.text[:100],
-                        'viral_score': getattr(post, 'viral_score', 0.0),
-                        'factors': getattr(post, 'viral_factors', []),
-                        'timestamp': datetime.now().isoformat(),
-                        'content_type': getattr(post, 'content_type', 'general')
-                    })
-                    logger.info(f"🔥 Пост добавлен в список потенциально вирусных (score: {getattr(post, 'viral_score', 0.0):.2f})")
-                
-                # Планируем отложенный анализ производительности (1h, 6h, 24h)
-                self.content_service.schedule_post_performance_checks(created.uri)
-                
-            else:
-                stage = getattr(quality_result, 'stage', None)
-                reason = getattr(quality_result, 'reason', 'unknown')
-                if stage == STAGE_GATE:
-                    logger.warning(
-                        "⚠️ Quality gate exhausted / failed (%s). Публикация отменена.",
-                        reason,
-                    )
-                elif stage == STAGE_SCORE:
-                    logger.warning(
-                        "⚠️ Пост не прошёл финальную оценку вирусности/порогов "
-                        "(%s). Публикация отменена.",
-                        reason,
-                    )
-                else:
-                    logger.warning(
-                        "⚠️ Пост не прошёл quality pipeline (%s/%s). "
-                        "Публикация отменена.",
-                        stage,
-                        reason,
-                    )
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка создания поста: {e}")
-            self.session_stats['errors'] += 1
-    
     def _spawn_background(self, coro) -> None:
         """Register a background task; auto-discard on completion."""
         if len(self._background_tasks) >= 50:
@@ -2997,123 +2897,29 @@ class AutonomousBlueskyBotV2:
             logger.error(f"Ошибка EngagementLearner tick: {e}")
 
     async def upload_image_to_bluesky(self, image_url: str) -> Optional[Dict]:
-        """Download image + upload_blob via ``retry_media_upload`` (RETRY-003)."""
-        try:
-            try:
-                image_url = validate_outbound_url(image_url)
-            except UnsafeURLError as e:
-                logger.warning(f"⚠️ Unsafe image URL rejected: {e}")
-                return None
+        """Thin delegate → :class:`MediaService`."""
+        return await self.media_service.upload_image_to_bluesky(image_url)
 
-            logger.info(f"📸 Загружаю изображение: {image_url}")
+    async def create_post_with_image(
+        self, text: str, image_url: str, alt_text: str = "Изображение к посту"
+    ) -> Optional[RichTextPost]:
+        """Thin delegate → :class:`MediaService` (strategy CallableImageUpload compat)."""
+        return await self.media_service.create_post_with_image(
+            text, image_url, alt_text=alt_text
+        )
 
-            async def _download_and_upload_once():
-                await self._ensure_http_session()
-                assert self.http_session is not None
-                try:
-                    async with self.http_session.get(image_url, timeout=30) as response:
-                        if response.status == 429:
-                            raise RuntimeError(f"HTTP 429 rate limit downloading {image_url}")
-                        if response.status >= 500:
-                            raise RuntimeError(f"HTTP {response.status} downloading {image_url}")
-                        if response.status != 200:
-                            # Non-retryable client response — surface as CLIENT for short-circuit
-                            raise RuntimeError(
-                                f"HTTP {response.status}: failed to download image {image_url}"
-                            )
-
-                        content_length = response.headers.get('content-length')
-                        if content_length and int(content_length) > 1000000:
-                            raise RuntimeError(
-                                f"HTTP 400: image too large ({content_length} bytes)"
-                            )
-
-                        image_data = await response.read()
-                        content_type = response.headers.get('content-type', '')
-                        if not content_type.startswith('image/'):
-                            raise RuntimeError(
-                                f"HTTP 400: invalid content-type {content_type}"
-                            )
-                except asyncio.TimeoutError as e:
-                    raise TimeoutError(f"Image download timed out for {image_url}") from e
-
-                return await self.bluesky_client.upload_blob(image_data)
-
-            blob_response = await self._media_upload_execute(_download_and_upload_once)
-            logger.info(f"✅ Изображение загружено: {blob_response.blob}")
-            return blob_response.blob
-
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки изображения: {e}")
-            return None
-
-    async def create_post_with_image(self, text: str, image_url: str, alt_text: str = "Изображение к посту") -> Optional[RichTextPost]:
-        """Создает пост с изображением"""
-        try:
-            # Загружаем изображение
-            blob = await self.upload_image_to_bluesky(image_url)
-            if not blob:
-                # Если не удалось загрузить изображение, создаем пост без него
-                logger.warning("⚠️ Создаю пост без изображения")
-                return self.formatter.create_post(text, content_type='news')
-            
-            # Создаем пост с изображением
-            post = self.formatter.create_post(text, content_type='news')
-            
-            # Добавляем embed с изображением
-            post.embed = {
-                "$type": "app.bsky.embed.images",
-                "images": [{
-                    "alt": alt_text,
-                    "image": blob
-                }]
-            }
-            
-            logger.info("✅ Пост с изображением создан")
-            return post
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка создания поста с изображением: {e}")
-            # Fallback - пост без изображения
-            return self.formatter.create_post(text, content_type='news')
-
-    async def create_post_with_link_preview(self, text: str, url: str, title: str, description: str, image_url: str = None) -> Optional[RichTextPost]:
-        """Создает пост с карточкой ссылки и изображением"""
-        try:
-            post = self.formatter.create_post(text, content_type='news')
-            
-            # СОХРАНЯЕМ URL И IMAGE_URL В ПОСТЕ ДЛЯ ПРОВЕРКИ ДУБЛИКАТОВ
-            post.url = url
-            post.image_url = image_url
-            
-            # Создаем базовую карточку ссылки
-            external_data = {
-                "uri": url,
-                "title": title[:300],  # BlueSky лимит
-                "description": description[:1000]  # BlueSky лимит
-            }
-            
-            # Если есть изображение, пытаемся его загрузить
-            if image_url:
-                blob = await self.upload_image_to_bluesky(image_url)
-                if blob:
-                    external_data["thumb"] = blob
-                    logger.info("✅ Добавлено изображение к карточке ссылки")
-            
-            # Добавляем карточку к посту
-            post.embed = {
-                "$type": "app.bsky.embed.external",
-                "external": external_data
-            }
-            
-            return post
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка создания поста с карточкой: {e}")
-            # Fallback - простой пост
-            return self.formatter.create_post(text, content_type='news')
-
-
+    async def create_post_with_link_preview(
+        self,
+        text: str,
+        url: str,
+        title: str,
+        description: str,
+        image_url: str = None,
+    ) -> Optional[RichTextPost]:
+        """Thin delegate → :class:`MediaService`."""
+        return await self.media_service.create_post_with_link_preview(
+            text, url, title, description, image_url=image_url
+        )
 
     async def create_image_prompt_from_text(self, text: str) -> str:
         """Создает качественный промпт для генерации изображения из текста поста"""
@@ -3148,20 +2954,8 @@ class AutonomousBlueskyBotV2:
         return "Abstract digital art, vibrant colors, lines and shapes, expressive" # Fallback промпт
 
     async def upload_image_data_to_bluesky(self, image_data: bytes) -> Optional[Dict]:
-        """Загрузка изображения в BlueSky из байтов via ``retry_media_upload`` (RETRY-003)."""
-        if not image_data:
-            logger.warning("⚠️ Попытка загрузить пустые данные изображения.")
-            return None
-        try:
-            response = await self._media_upload_execute(
-                self.bluesky_client.upload_blob, image_data
-            )
-            logger.info("✅ Изображение успешно загружено в BlueSky")
-            return response.blob
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки данных изображения в BlueSky: {e}")
-            self.session_stats['errors'] += 1
-            return None
+        """Thin delegate → :class:`MediaService` (CallableImageUpload compat)."""
+        return await self.media_service.upload_image_data_to_bluesky(image_data)
 
     async def generate_structured_post_content(self, prompt: str, model_key: str = 'creative') -> Optional[Dict[str, str]]:
         """Генерирует структурированный пост (текст + хештеги) и возвращает dict.
@@ -3473,234 +3267,13 @@ class AutonomousBlueskyBotV2:
         
         return analysis
     
-    async def health_monitor(self) -> Dict[str, any]:
-        """Мониторинг здоровья бота и автоматическое восстановление"""
-        logger.info("🏥 Запуск мониторинга здоровья бота...")
-        
-        health_status = {
-            'overall_health': 'healthy',
-            'last_activity': None,
-            'network_status': 'unknown',
-            'memory_usage': 0,
-            'api_connectivity': {},
-            'recommendations': [],
-            'auto_recovery_actions': []
-        }
-        
-        try:
-            # 1. Проверка сетевого подключения
-            network_checks = await self._check_network_connectivity()
-            health_status['api_connectivity'] = network_checks
-            health_status['network_status'] = 'healthy' if network_checks.get('bluesky_api', False) else 'degraded'
-            
-            # 2. Проверка использования памяти
-            try:
-                import psutil
-                process = psutil.Process()
-                memory_mb = process.memory_info().rss / 1024 / 1024
-                health_status['memory_usage'] = memory_mb
-            except ImportError:
-                health_status['memory_usage'] = 0
-                logger.warning("⚠️ psutil не установлен, мониторинг памяти недоступен")
-            
-            # 3. Проверка последней активности
-            last_activity = await self._check_last_activity()
-            health_status['last_activity'] = last_activity
-            
-            # 4. Анализ потенциальных проблем
-            issues = await self._analyze_potential_issues(health_status)
-            
-            # 5. Автоматическое восстановление если нужно
-            recovery_actions = await self._perform_auto_recovery(issues)
-            health_status['auto_recovery_actions'] = recovery_actions
-            
-            # 6. Общая оценка здоровья
-            if len(issues) == 0:
-                health_status['overall_health'] = 'healthy'
-            elif len(issues) <= 2:
-                health_status['overall_health'] = 'warning'
-            else:
-                health_status['overall_health'] = 'critical'
-                
-            logger.info(f"🏥 Мониторинг завершен: {health_status['overall_health']}")
-            for action in recovery_actions:
-                logger.info(f"🔧 Восстановление: {action}")
-                
-            return health_status
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка мониторинга здоровья: {e}")
-            health_status['overall_health'] = 'error'
-            return health_status
-    
-    async def _check_network_connectivity(self) -> Dict[str, bool]:
-        """Проверка доступности внешних API"""
-        connectivity = {
-            'bluesky_api': False,
-            'pollinations_ai': False,
-            'openai_api': False,
-            'general_internet': False
-        }
-        
-        # Проверяем каждый сервис с таймаутом
-        async def check_endpoint(url: str, timeout: int = 10) -> bool:
-            try:
-                if not self.http_session:
-                    return False
-                async with self.http_session.get(url, timeout=timeout) as response:
-                    return response.status < 500
-            except Exception as e:
-                logger.debug(f"Сетевая проверка {url}: {e}")
-                return False
-        
-        try:
-            # Быстрые проверки параллельно
-            tasks = [
-                check_endpoint('https://rooter.us-west.host.bsky.network/'),
-                check_endpoint('https://text.pollinations.ai/'),
-                check_endpoint('https://api.openai.com/'),
-                check_endpoint('https://httpbin.org/get')  # Общий интернет
-            ]
-            
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            connectivity['bluesky_api'] = results[0] if isinstance(results[0], bool) else False
-            connectivity['pollinations_ai'] = results[1] if isinstance(results[1], bool) else False
-            connectivity['openai_api'] = results[2] if isinstance(results[2], bool) else False
-            connectivity['general_internet'] = results[3] if isinstance(results[3], bool) else False
-            
-        except Exception as e:
-            logger.warning(f"⚠️ Ошибка проверки сети: {e}")
-            
-        return connectivity
-    
-    async def _check_last_activity(self) -> Dict[str, any]:
-        """Проверка последней активности бота"""
-        try:
-            now = datetime.now()
-            activity = {
-                'last_post_hours_ago': None,
-                'last_engagement_hours_ago': None,
-                'cycles_without_posts': 0,
-                'stuck_in_cycle': False
-            }
-            
-            # Проверяем последний пост
-            if self.memory.successful_posts:
-                last_post_time = max(post.get('timestamp', now) for post in self.memory.successful_posts[-10:])
-                if isinstance(last_post_time, str):
-                    last_post_time = datetime.fromisoformat(last_post_time.replace('Z', '+00:00'))
-                activity['last_post_hours_ago'] = (now - last_post_time).total_seconds() / 3600
-            
-            # Проверяем активность взаимодействий
-            if hasattr(self, 'session_stats'):
-                if self.session_stats.get('likes_given', 0) > 0:
-                    activity['last_engagement_hours_ago'] = 0  # Недавно ставили лайки
-                else:
-                    activity['last_engagement_hours_ago'] = 2  # Примерная оценка
-            
-            # Определяем застревание в цикле
-            if activity['last_post_hours_ago'] and activity['last_post_hours_ago'] > 6:
-                activity['stuck_in_cycle'] = True
-                
-            return activity
-        except Exception as e:
-            logger.warning(f"⚠️ Ошибка проверки активности: {e}")
-            return {}
-    
-    async def _analyze_potential_issues(self, health_status: Dict) -> List[str]:
-        """Анализ потенциальных проблем"""
-        issues = []
-        
-        # Проверка сетевых проблем
-        if not health_status['api_connectivity'].get('bluesky_api', False):
-            issues.append('bluesky_api_unavailable')
-        
-        if not health_status['api_connectivity'].get('general_internet', False):
-            issues.append('internet_connectivity_issue')
-        
-        # Проверка использования памяти
-        if health_status['memory_usage'] > 400:  # Более 400MB
-            issues.append('high_memory_usage')
-        
-        # Проверка активности
-        activity = health_status.get('last_activity', {})
-        if activity.get('stuck_in_cycle', False):
-            issues.append('stuck_in_posting_cycle')
-        
-        if activity.get('last_post_hours_ago', 0) > 8:  # Нет постов 8+ часов
-            issues.append('no_posts_long_time')
-        
-        return issues
-    
-    async def _perform_auto_recovery(self, issues: List[str]) -> List[str]:
-        """Автоматические действия по восстановлению"""
-        recovery_actions = []
-        
-        try:
-            # Очистка памяти при высоком использовании
-            if 'high_memory_usage' in issues:
-                self._cleanup_old_content_hashes()
-                self._cleanup_old_commented_posts()
-                recovery_actions.append('memory_cleanup_performed')
-            
-            # Принудительное создание поста если долго не было
-            if 'no_posts_long_time' in issues:
-                try:
-                    emergency_post = await self._create_emergency_unique_post()
-                    if emergency_post:
-                        recovery_actions.append('emergency_post_created')
-                except Exception as e:
-                    logger.warning(f"⚠️ Не удалось создать экстренный пост: {e}")
-            
-            # Сброс состояния при зависании
-            if 'stuck_in_posting_cycle' in issues:
-                recovery_actions.append('cycle_state_reset')
-            
-            # Переинициализация HTTP сессии при сетевых проблемах
-            if 'bluesky_api_unavailable' in issues or 'internet_connectivity_issue' in issues:
-                try:
-                    await self._ensure_http_session(force_recreate=True)
-                    recovery_actions.append('http_session_reinitialized')
-                except Exception as e:
-                    logger.warning(f"⚠️ Не удалось переинициализировать HTTP сессию: {e}")
-        
-        except Exception as e:
-            logger.error(f"❌ Ошибка автовосстановления: {e}")
-            recovery_actions.append(f'recovery_error: {str(e)}')
-        
-        return recovery_actions
-    
+    async def health_monitor(self) -> Dict[str, Any]:
+        """Thin delegate → :class:`HealthService`."""
+        return await self.health_service.health_monitor()
+
     async def emergency_recovery(self) -> bool:
-        """Экстренное восстановление бота при критических проблемах"""
-        logger.warning("🚨 ЭКСТРЕННОЕ ВОССТАНОВЛЕНИЕ АКТИВИРОВАНО")
-        
-        try:
-            # 1. Сохраняем текущее состояние
-            self.memory.save()
-            logger.info("💾 Состояние сохранено")
-            
-            # 2. Очищаем все кэши и временные данные
-            self._cleanup_old_content_hashes()
-            self._cleanup_old_commented_posts()
-            logger.info("🧹 Кэши очищены")
-            
-            # 3. Переинициализируем HTTP сессию
-            await self._ensure_http_session(force_recreate=True)
-            logger.info("🔄 HTTP сессия переинициализирована")
-            
-            # 4. Проверяем аутентификацию
-            auth_success = await self.authenticate()
-            if not auth_success:
-                logger.error("❌ Не удалось восстановить аутентификацию")
-                return False
-            
-            logger.info("✅ Экстренное восстановление завершено успешно")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Критическая ошибка экстренного восстановления: {e}")
-            return False
+        """Thin delegate → :class:`HealthService`."""
+        return await self.health_service.emergency_recovery()
 
 async def main():
     load_dotenv(override=False)

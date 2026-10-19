@@ -205,7 +205,9 @@ post = await strategy_fn()
 - Smart engagement → `app/smart_engagement.py` (`SmartEngagementOrchestrator`)
 - Daily report / dry-run flush → `app/daily_reporting.py` (`DailyReportingFacade`)
 
-**Optional later:** further LOC shrink of bot shell; formal architecture re-audit.
+**Done (thin-shell cycle):** formal re-score **7.5/10**; extracted `relevance_scoring`, `follow_strategy`, `rss_content` (bot ~3151 LOC).
+
+**Optional later:** `create_scheduled_post` orchestration; health/media/auth slices; further LOC shrink.
 
 Each slice: ports → wire → tests → shrink bot LOC. Prefer ≤1 major slice per orchestration.
 

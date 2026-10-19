@@ -42,6 +42,7 @@ PYFILES=(
     engagement_cache_sync.py
     engagement_ports.py
     engagement_service.py
+    follow_strategy.py
     growth_engine.py
     heartbeat_monitor.py
     post_strategies.py
@@ -50,7 +51,9 @@ PYFILES=(
     openrouter_adapter.py
     pollinations_adapter.py
     quality_pipeline.py
+    relevance_scoring.py
     resilience_service.py
+    rss_content.py
     rss_source_manager.py
     smart_engagement.py
     state_service.py

@@ -166,7 +166,12 @@ from engagement_cache_sync import (
     hydrate_engagement_caches_from_memory,
     sync_engagement_caches_to_memory,
 )
+from follow_strategy import CallableFollowPorts, FollowStrategyOrchestrator
+from follow_strategy import should_follow_user as follow_should_follow_user
 from heartbeat_monitor import HeartbeatMonitor
+from relevance_scoring import calculate_relevance as score_post_relevance
+from rss_content import RssContentFetcher, RssContentPorts
+from rss_content import clean_html as rss_clean_html
 from smart_engagement import (
     CallableRelevance,
     CallableRepostPolicy,
@@ -671,6 +676,11 @@ class AutonomousBlueskyBotV2:
         self.duplicate_fallback_helper = DuplicateFallbackHelper(
             self._build_duplicate_fallback_ports()
         )
+        # Thin-shell: RSS / follow / relevance (REL/FOL/RSS-001)
+        self.rss_content_fetcher = RssContentFetcher(self._build_rss_content_ports())
+        self.follow_strategy_orchestrator = FollowStrategyOrchestrator(
+            self._build_follow_ports()
+        )
         # Phase 7: smart engagement orchestrator (ENG-001)
         self.smart_engagement_orchestrator = SmartEngagementOrchestrator(
             self._build_smart_engagement_ports()
@@ -789,6 +799,55 @@ class AutonomousBlueskyBotV2:
             ab_results=self.ab_engine.results,
             dry_run=bool(self.dry_run),
             dry_run_log=self.dry_run_log,
+        )
+
+    def _build_rss_content_ports(self) -> RssContentPorts:
+        """Composition-root wiring for RssContentFetcher (RSS-001)."""
+        return RssContentPorts(
+            http_get_text=self._http_get_text_with_retry,
+            record_fetch=self.rss_manager.record_fetch,
+            set_trend_headlines=lambda titles: setattr(
+                self, "_trend_rss_headlines", list(titles)
+            ),
+            clean=self.clean_html,
+        )
+
+    def _build_follow_ports(self) -> CallableFollowPorts:
+        """Composition-root wiring for FollowStrategyOrchestrator (FOL-001)."""
+
+        async def _get_suggestions(*, limit: int = 30):
+            async def _inner():
+                return await self.bluesky_client.app.bsky.actor.get_suggestions(
+                    params={"limit": limit}
+                )
+
+            return await self._atproto_execute(_inner)
+
+        async def _get_profile(did: str):
+            async def _inner():
+                return await self.bluesky_client.app.bsky.actor.get_profile(
+                    params={"actor": did}
+                )
+
+            return await self._atproto_execute(_inner)
+
+        async def _get_timeline(*, limit: int = 30):
+            return await self._atproto_execute(
+                self.bluesky_client.get_timeline, limit=limit
+            )
+
+        return CallableFollowPorts(
+            _get_suggestions=_get_suggestions,
+            _get_profile=_get_profile,
+            _get_timeline=_get_timeline,
+            _follow=self.engagement_service.follow,
+            _update_relationship=self.update_user_relationship,
+            _get_my_did=lambda: (
+                getattr(self.bluesky_client.me, "did", None)
+                if hasattr(self.bluesky_client, "me") and self.bluesky_client.me
+                else None
+            ),
+            _followed_users=self.followed_users,
         )
 
     def _build_smart_engagement_ports(self) -> SmartEngagementPorts:
@@ -1110,14 +1169,8 @@ class AutonomousBlueskyBotV2:
 
     # Копируем все базовые методы из оригинального бота
     def clean_html(self, raw_html: str) -> str:
-        """Удаляет HTML-теги из строки и декодирует HTML-сущности"""
-        if not raw_html:
-            return ""
-        text = html.unescape(raw_html)
-        clean_text = re.sub(r'<[^>]+>', '', text)
-        clean_text = re.sub(r'submitted by /u/[\w-]+', '', clean_text)
-        clean_text = re.sub(r'\[link\]|\[comments\]', '', clean_text)
-        return clean_text.strip()
+        """Удаляет HTML-теги (RSS-001 shared helper)."""
+        return rss_clean_html(raw_html)
     
     def _generate_content_hash(self, text: str, url: str = None, image_url: str = None) -> str:
         """Генерирует хеш контента (STATE-001 → ContentPublishState)."""
@@ -1860,275 +1913,24 @@ class AutonomousBlueskyBotV2:
     
     # Копируем остальные методы из оригинального бота
     async def fetch_external_content(self) -> List[Dict]:
-        """УЛУЧШЕННОЕ получение контента из внешних источников с ротацией и аналитикой"""
-        all_entries = []
-        
-        # Используем ПОЛНЫЙ список RSS источников с ротацией
-        available_sources = self.rss_feeds.copy()
-        random.shuffle(available_sources)  # Ротация для разнообразия
-        
-        sources_used = 0
-        max_sources = 6  # Увеличиваем количество источников
-        target_entries = 15  # Целевое количество записей
-        
-        logger.info(f"🌐 Начинаем получение RSS из {len(available_sources)} доступных источников...")
-        
-        for feed_url in available_sources:
-            if sources_used >= max_sources or len(all_entries) >= target_entries:
-                break
-                
-            try:
-                try:
-                    feed_url = validate_outbound_url(feed_url)
-                except UnsafeURLError as e:
-                    logger.warning(f"⚠️ Unsafe RSS URL skipped: {e}")
-                    continue
+        """RSS headlines (RSS-001 → RssContentFetcher)."""
+        return await self.rss_content_fetcher.fetch(list(self.rss_feeds))
 
-                # Адаптивный таймаут на основе истории
-                timeout = 20 if 'cnn.com' in feed_url else 15
-                
-                start_time = datetime.now()
-                
-                # Shared session + retry_rss_http (RETRY-002)
-                status, content = await self._http_get_text_with_retry(
-                    feed_url, timeout=timeout
-                )
-                if status != 200:
-                    logger.warning(f"⚠️ {feed_url}: HTTP {status}")
-                    continue
-
-                feed = feedparser.parse(content)
-
-                fetch_time = (datetime.now() - start_time).total_seconds()
-
-                # Ограичиваем записи для разнообразия (было 3, стало 4)
-                entries_to_process = 4
-                source_entries = []
-
-                for entry in feed.entries[:entries_to_process]:
-                    entry_data = {
-                        'title': self.clean_html(entry.title),
-                        'url': entry.link,
-                        'description': self.clean_html(entry.get('summary', '')[:250]),
-                        'source': self.clean_html(feed.feed.title) if hasattr(feed.feed, 'title') else 'Unknown',
-                        'published': entry.get('published', ''),
-                        'fetch_time': fetch_time,
-                        'source_url': feed_url,
-                        'image_url': None,
-                        'priority_score': 0
-                    }
-
-                    # УЛУЧШЕННЫЙ поиск изображений
-                    image_url = self._enhanced_image_extraction(entry)
-                    entry_data['image_url'] = image_url
-
-                    # Расчет приоритета записи
-                    entry_data['priority_score'] = self._calculate_entry_priority(entry_data, feed_url)
-
-                    # Фильтруем только качественные записи
-                    if len(entry_data['title']) > 20 and entry_data['title'] != 'Unknown':
-                        source_entries.append(entry_data)
-
-                if source_entries:
-                    all_entries.extend(source_entries)
-                    sources_used += 1
-
-                    source_name = feed.feed.title if hasattr(feed.feed, 'title') else feed_url.split('//')[-1].split('/')[0]
-                    logger.info(f"✅ {source_name}: {len(source_entries)} записей за {fetch_time:.1f}с")
-                    # RSS Source Intelligence: record success
-                    try:
-                        self.rss_manager.record_fetch(
-                            feed_url,
-                            success=True,
-                            latency=fetch_time,
-                            entries=len(source_entries),
-                            duplicates=entries_to_process - len(source_entries),
-                        )
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        self.rss_manager.record_fetch(feed_url, success=False, latency=fetch_time)
-                    except Exception:
-                        pass
-
-                # Пауза между источниками для вежливости
-                await asyncio.sleep(0.3)
-
-            except asyncio.TimeoutError:
-                source_name = feed_url.split('//')[-1].split('/')[0]
-                logger.warning(f"⏰ {source_name}: таймаут ({timeout}с)")
-                try:
-                    self.rss_manager.record_fetch(feed_url, success=False, latency=float(timeout))
-                except Exception:
-                    pass
-                continue
-            except Exception as e:
-                source_name = feed_url.split('//')[-1].split('/')[0]
-                logger.warning(f"❌ {source_name}: {str(e)[:80]}...")
-                try:
-                    self.rss_manager.record_fetch(feed_url, success=False, latency=0.0)
-                except Exception:
-                    pass
-                continue
-        
-        # Удаляем дубликаты и сортируем по приоритету
-        unique_entries = self._deduplicate_rss_entries(all_entries)
-        prioritized_entries = sorted(unique_entries, key=lambda x: x.get('priority_score', 0), reverse=True)
-        
-        # Аналитика
-        with_images = sum(1 for e in prioritized_entries if e.get('image_url'))
-        avg_fetch_time = sum(e.get('fetch_time', 0) for e in prioritized_entries) / len(prioritized_entries) if prioritized_entries else 0
-        
-        logger.info(f"📊 RSS аналитика:")
-        logger.info(f"   🌐 Обработано источников: {sources_used}/{len(available_sources)}")
-        logger.info(f"   📰 Всего записей: {len(all_entries)} → уникальных: {len(unique_entries)}")
-        logger.info(f"   🖼️ С изображениями: {with_images}/{len(prioritized_entries)}")
-        logger.info(f"   ⚡ Среднее время загрузки: {avg_fetch_time:.1f}с")
-        
-        # Возвращаем топ записи
-        final_entries = prioritized_entries[:10]
-        logger.info(f"📋 Выбрано {len(final_entries)} лучших записей для использования")
-
-        # Trend Radar feed: save RSS headlines for topic-of-day detection
-        self._trend_rss_headlines = [e.get('title', '') for e in prioritized_entries[:30]]
-
-        return final_entries
-    
     def _enhanced_image_extraction(self, entry) -> Optional[str]:
-        """Улучшенный поиск изображений в RSS записи"""
-        # 1. Media thumbnail (наиболее надежный)
-        if hasattr(entry, 'media_thumbnail') and entry.media_thumbnail:
-            return entry.media_thumbnail[0].get('url')
-        
-        # 2. Enclosures
-        if hasattr(entry, 'enclosures'):
-            for enclosure in entry.enclosures:
-                if enclosure.get('type', '').startswith('image/'):
-                    return enclosure.get('href')
-                                
-        # 3. Media content
-        if hasattr(entry, 'media_content'):
-            for media in entry.media_content:
-                if media.get('type', '').startswith('image/'):
-                    return media.get('url')
-        
-        # 4. Поиск в content/summary с улучшенным regex
-        content_fields = []
-        if hasattr(entry, 'content'):
-            content_fields.extend([c.get('value', '') for c in entry.content])
-        if hasattr(entry, 'summary'):
-            content_fields.append(entry.summary)
-        
-        for content in content_fields:
-            # Ищем img теги (различные варианты кавычек)
-            img_patterns = [
-                r'<img[^>]+src=["\']([^"\']+)["\']',
-                r'<img[^>]+src=([^>\s]+)',
-                r'data-src=["\']([^"\']+)["\']'  # Lazy loading images
-            ]
-            
-            for pattern in img_patterns:
-                img_match = re.search(pattern, content)
-                if img_match:
-                    return img_match.group(1)
-                                
-        # 5. Links с типом изображения
-        if hasattr(entry, 'links'):
-            for link in entry.links:
-                if link.get('type', '').startswith('image/'):
-                    return link.get('href')
-        
-        return None
-    
+        """Image URL from RSS entry (RSS-001)."""
+        from rss_content import enhanced_image_extraction
+        return enhanced_image_extraction(entry)
+
     def _calculate_entry_priority(self, entry_data: Dict, source_url: str) -> float:
-        """Расчет приоритета записи для ранжирования"""
-        score = 0.0
-        
-        # Базовый балл по источнику
-        if 'venturebeat.com' in source_url or 'techcrunch.com' in source_url:
-            score += 0.25  # AI и tech новости
-        elif 'ycombinator.com' in source_url or 'reddit.com' in source_url:
-            score += 0.2  # Сообщество разработчиков
-        else:
-            score += 0.15  # Остальные источники
-        
-        # Бонус за изображение
-        if entry_data.get('image_url'):
-            score += 0.2
-        
-        # Бонус за качество заголовка
-        title_len = len(entry_data.get('title', ''))
-        if 40 <= title_len <= 120:
-            score += 0.15  # Оптимальная длина
-        elif title_len > 120:
-            score += 0.05  # Слишком длинный
-        
-        # Бонус за описание
-        desc_len = len(entry_data.get('description', ''))
-        if desc_len > 80:
-            score += 0.1
-        
-        # Бонус за актуальность (если есть дата)
-        if entry_data.get('published'):
-            try:
-                # Простая проверка на свежесть (в течение недели)
-                import time
-                published_time = time.mktime(time.strptime(entry_data['published'][:25], '%a, %d %b %Y %H:%M:%S'))
-                age_hours = (time.time() - published_time) / 3600
-                if age_hours < 24:
-                    score += 0.1  # Свежие новости
-                elif age_hours < 168:  # неделя
-                    score += 0.05
-            except:
-                pass  # Игнорируем ошибки парсинга даты
-        
-        # Штраф за быструю загрузку (может быть проблемный источник)
-        fetch_time = entry_data.get('fetch_time', 1)
-        if fetch_time > 3:
-            score *= 0.9  # Небольшой штраф за медленные источники
-        
-        return round(score, 3)
-    
+        """RSS entry priority (RSS-001)."""
+        from rss_content import calculate_entry_priority
+        return calculate_entry_priority(entry_data, source_url)
+
     def _deduplicate_rss_entries(self, entries: List[Dict]) -> List[Dict]:
-        """Удаление дубликатов RSS записей по URL и схожести заголовков"""
-        seen_urls = set()
-        seen_titles = set()
-        unique_entries = []
-        
-        for entry in entries:
-            url = entry.get('url', '')
-            title = entry.get('title', '').lower().strip()
-            
-            # Проверяем URL
-            if url and url in seen_urls:
-                logger.debug(f"🔄 Дубликат URL: {url[:50]}...")
-                continue
-            
-            # Проверяем схожесть заголовков
-            title_words = set(title.split())
-            is_similar = False
-            
-            for seen_title in seen_titles:
-                seen_words = set(seen_title.split())
-                if title_words and seen_words:
-                    # Коэффициент Жаккара для схожести
-                    intersection = len(title_words.intersection(seen_words))
-                    union = len(title_words.union(seen_words))
-                    similarity = intersection / union if union > 0 else 0
-                    
-                    if similarity > 0.65:  # 65% схожести считается дубликатом
-                        is_similar = True
-                        logger.debug(f"🔄 Похожий заголовок: {title[:50]}... (схожесть: {similarity:.2f})")
-                        break
-            
-            if not is_similar and title:
-                unique_entries.append(entry)
-                seen_urls.add(url)
-                seen_titles.add(title)
-        
-        return unique_entries
-    
+        """RSS dedupe (RSS-001)."""
+        from rss_content import deduplicate_rss_entries
+        return deduplicate_rss_entries(entries)
+
     def _generate_fallback_content(self, prompt: str) -> str:
         """Генерирует резервный контент, если AI недоступен"""
         fallback_templates = {
@@ -2181,74 +1983,13 @@ class AutonomousBlueskyBotV2:
         await self.smart_engagement_orchestrator.run(cfg)
 
     def calculate_relevance(self, text: str, post) -> float:
-        """Компонентный расчёт релевантности поста (topical + structure + engagement)."""
-        import math
-
-        rel = self.config.get('relevance_settings', {})
-        topic_groups = rel.get('topic_groups', {})
-        topical_max = rel.get('topical_max', 0.45)
-        kw_per_match = rel.get('keyword_per_match', 0.05)
-        hashtag_bonus_val = rel.get('hashtag_bonus', 0.08)
-        question_bonus_val = rel.get('question_bonus', 0.07)
-        length_range = rel.get('optimal_length_range', [80, 300])
-        length_bonus_val = rel.get('length_bonus', 0.05)
-        eng_log_base = rel.get('engagement_log_base', 10)
-        eng_max = rel.get('engagement_max', 0.25)
-
-        text_lower = text.lower()
-        tokens = set(re.findall(r'\b[a-zA-Z\u0400-\u04FF]{2,}\b', text_lower))
-
-        # --- Topical score (token match by groups) ---
-        topical = 0.0
-        matched_groups = {}
-        for group_name, group_data in topic_groups.items():
-            kws = group_data.get('keywords', [])
-            weight = group_data.get('weight', kw_per_match)
-            hits = []
-            for kw in kws:
-                kw_parts = kw.lower().split()
-                if len(kw_parts) == 1:
-                    if kw_parts[0] in tokens:
-                        hits.append(kw)
-                else:
-                    if kw.lower() in text_lower:
-                        hits.append(kw)
-            if hits:
-                matched_groups[group_name] = hits
-                topical += weight * len(hits)
-        topical = min(topical, topical_max)
-
-        # --- Structure score ---
-        structure = 0.0
-        hashtag_count = text.count('#')
-        if hashtag_count > 0:
-            structure += hashtag_bonus_val
-        if '?' in text:
-            structure += question_bonus_val
-        text_len = len(text)
-        if len(length_range) >= 2 and length_range[0] <= text_len <= length_range[1]:
-            structure += length_bonus_val
-
-        # --- Engagement score (log curve) ---
-        likes = getattr(post.post, 'like_count', 0) or 0
-        reposts_count = getattr(post.post, 'repost_count', 0) or 0
-        raw_engagement = likes + reposts_count * 2
-        if raw_engagement > 0 and eng_log_base > 1:
-            eng_score = min(math.log(1 + raw_engagement, eng_log_base) / math.log(1000, eng_log_base), 1.0) * eng_max
-        else:
-            eng_score = 0.0
-
-        final = min(topical + structure + eng_score, 1.0)
-
-        # --- Compact log ---
-        groups_str = ', '.join(f"{g}({len(h)})" for g, h in matched_groups.items()) if matched_groups else '-'
-        logger.info(
-            f"      📊 score={final:.2f}  topical={topical:.2f}[{groups_str}]  "
-            f"struct={structure:.2f}  engage={eng_score:.2f}({likes}L+{reposts_count}R={raw_engagement})"
+        """Компонентный score (REL-001 → relevance_scoring)."""
+        return score_post_relevance(
+            text,
+            post,
+            self.config.get("relevance_settings", {}),
         )
 
-        return final
-    
     async def reply_to_post(self, post, comment_text: str) -> None:
         """Ответ на пост с правильным форматированием и поддержкой упоминаний"""
         try:
@@ -2578,70 +2319,9 @@ class AutonomousBlueskyBotV2:
         await asyncio.sleep(operation_delay)
     
     def should_follow_user(self, actor) -> bool:
-        """Определение, стоит ли подписаться на пользователя"""
-        try:
-            description = (actor.description or "").lower()
-            
-            # Расширенные ключевые слова для подписки (на основе анализа популярных тем)
-            target_keywords = [
-                # Творчество
-                'художник', 'artist', 'дизайнер', 'designer', 'фотограф', 'photographer',
-                'музыкант', 'musician', 'писатель', 'writer', 'автор', 'author',
-                
-                # Технологии
-                'программист', 'developer', 'разработчик', 'ai', 'ии', 'программирование', 
-                'технологии', 'python', 'javascript', 'tech', 'стартап', 'startup',
-                'инновации', 'наука', 'исследования', 'research',
-                
-                # Образование и культура
-                'учитель', 'teacher', 'преподаватель', 'философ', 'philosopher',
-                'культура', 'culture', 'образование', 'education', 'блогер', 'blogger',
-                
-                # Хобби и интересы
-                'путешественник', 'traveler', 'повар', 'chef', 'спортсмен', 'athlete',
-                'природа', 'nature', 'экология', 'ecology', 'животные', 'animals',
-                
-                # Профессии
-                'журналист', 'journalist', 'психолог', 'psychologist', 'врач', 'doctor',
-                'бизнес', 'business', 'предприниматель', 'entrepreneur'
-            ]
-            
-            found_keywords = [keyword for keyword in target_keywords if keyword in description]
-            keyword_score = len(found_keywords)
-            
-            # Проверяем активность
-            followers_count = getattr(actor, 'followers_count', 0)
-            following_count = getattr(actor, 'follows_count', 0)
-            posts_count = getattr(actor, 'posts_count', 0)
-            
-            logger.info(f"    🔍 Анализ критериев:")
-            logger.info(f"      Найденные ключевые слова: {found_keywords} (score: {keyword_score})")
-            
-            # Смягченные фильтры качества
-            if followers_count > 100000:  # Слишком популярные
-                logger.info(f"      ❌ Слишком популярный пользователь ({followers_count} подписчиков)")
-                return False
-            if following_count > followers_count * 5 and followers_count > 0:  # Смягчен с *3 до *5
-                logger.info(f"      ❌ Подозрительное соотношение подписок ({following_count} vs {followers_count})")
-                return False
-            if posts_count < 3:  # Понижено с 10 до 3 постов
-                logger.info(f"      ❌ Низкая активность ({posts_count} постов)")
-                return False
-            
-            # Дополнительные критерии для новых пользователей
-            if posts_count == 0 and followers_count == 0 and following_count == 0:
-                logger.info(f"      ❌ Совершенно новый аккаунт без активности")
-                return False
-            
-            # Решение на основе ключевых слов (понижен порог с 2 до 1)
-            result = keyword_score >= 1
-            logger.info(f"      {'✅' if result else '❌'} Итоговое решение: {keyword_score} ключевых слов >= 1")
-            return result
-            
-        except Exception as e:
-            logger.error(f"Ошибка анализа пользователя: {e}")
-            return False
-    
+        """Follow heuristic (FOL-001 → follow_strategy)."""
+        return follow_should_follow_user(actor)
+
     def update_user_relationship(self, user_did: str, action: str, score: float) -> None:
         """Обновляет отношения с пользователем"""
         if user_did not in self.memory.user_relationships:
@@ -2671,194 +2351,17 @@ class AutonomousBlueskyBotV2:
         })
     
     async def follow_strategy(self) -> None:
-        """Стратегия подписок для роста аудитории"""
-        try:
-            # Пробуем два источника: рекомендации + авторы популярных постов
-            strategies = [
-                self._follow_from_suggestions,
-                self._follow_from_timeline
-            ]
-            
-            for strategy in strategies:
-                followed = await strategy()
-                if followed > 0:
-                    break  # Если одна стратегия сработала, переходим к следующему циклу
-                        
-        except Exception as e:
-            logger.error(f"❌ Ошибка стратегии подписок: {e}")
-    
+        """Follow orchestration (FOL-001 → FollowStrategyOrchestrator)."""
+        await self.follow_strategy_orchestrator.run()
+
     async def _follow_from_suggestions(self) -> int:
-        """Подписки на основе рекомендаций BlueSky"""
-        try:
-            async def _get_suggestions():
-                return await self.bluesky_client.app.bsky.actor.get_suggestions(
-                    params={'limit': 30}
-                )
+        """Suggestions follow source (FOL-001)."""
+        return await self.follow_strategy_orchestrator.from_suggestions()
 
-            suggestions = await self._atproto_execute(_get_suggestions)
-            logger.info(f"👥 Получено {len(suggestions.actors)} рекомендаций пользователей")
-            
-            followed = 0
-            max_follows = 1  # ИЗМЕНЕНО: Максимум 1 подписка за стратегию (было 3)
-            users_analyzed = 0
-            
-            for actor in suggestions.actors:
-                if followed >= max_follows:
-                    break
-                
-                users_analyzed += 1
-                
-                try:
-                    # Получаем полный профиль пользователя для доступа к статистике
-                    async def _get_profile(did=actor.did):
-                        return await self.bluesky_client.app.bsky.actor.get_profile(
-                            params={'actor': did}
-                        )
-
-                    full_profile = await self._atproto_execute(_get_profile)
-                    profile = full_profile
-                    
-                    # Теперь у нас есть доступ к статистике
-                    description = (profile.description or "").lower()
-                    followers = profile.followers_count if hasattr(profile, 'followers_count') else 0
-                    following = profile.follows_count if hasattr(profile, 'follows_count') else 0
-                    posts = profile.posts_count if hasattr(profile, 'posts_count') else 0
-                    
-                    logger.info(f"🔍 Анализ #{users_analyzed}: @{profile.handle}")
-                    logger.info(f"    Описание: {profile.description[:100] if profile.description else 'Нет описания'}")
-                    logger.info(f"    Подписчики: {followers}, Подписки: {following}, Посты: {posts}")
-                    
-                    # Проверяем, подходит ли пользователь с обновленным профилем
-                    should_follow = self.should_follow_user(profile)
-                    logger.info(f"    Решение: {'✅ Подписаться' if should_follow else '❌ Пропустить'}")
-                    
-                    if should_follow and profile.did not in self.followed_users:
-                        try:
-                            followed_ok = await self.engagement_service.follow(
-                                did=profile.did,
-                                handle=profile.handle,
-                                source='suggestions',
-                            )
-                            if followed_ok:
-                                logger.info(f"➕ Подписка на @{profile.handle} выполнена!")
-                                followed += 1
-
-                            try:
-                                self.update_user_relationship(profile.did, 'follow', 5)
-                            except Exception as rel_error:
-                                logger.warning(f"⚠️ Ошибка обновления отношений для @{profile.handle}: {rel_error}")
-
-                            await asyncio.sleep(random.uniform(3, 7))
-
-                        except Exception as e:
-                            logger.error(f"Ошибка подписки на @{profile.handle}: {e}")
-                    elif profile.did in self.followed_users:
-                        logger.info(f"👥 Уже подписаны на @{profile.handle}, пропускаем")
-                            
-                except Exception as e:
-                    logger.error(f"Ошибка получения профиля @{actor.handle}: {e}")
-                    continue
-            
-            logger.info(f"📊 Стратегия рекомендаций:")
-            logger.info(f"    Проанализировано: {users_analyzed} пользователей")
-            logger.info(f"    Подписок сделано: {followed}")
-            
-            return followed
-                        
-        except Exception as e:
-            logger.error(f"❌ Ошибка стратегии рекомендаций: {e}")
-            return 0
-    
     async def _follow_from_timeline(self) -> int:
-        """Подписки на авторов популярных постов из ленты"""
-        try:
-            timeline = await self._atproto_execute(
-                self.bluesky_client.get_timeline, limit=30
-            )
-            logger.info(f"📰 Анализ авторов популярных постов из ленты")
-            
-            followed = 0
-            max_follows = 1  # ИЗМЕНЕНО: Максимум 1 подписка из ленты (было 2)
-            analyzed_authors = set()
-            
-            # Сортируем посты по популярности
-            popular_posts = sorted(timeline.feed, 
-                                 key=lambda x: (x.post.like_count or 0) + (x.post.repost_count or 0) * 2, 
-                                 reverse=True)[:20]
-            
-            for post in popular_posts:
-                if followed >= max_follows:
-                    break
-                    
-                author = post.post.author
-                
-                # Пропускаем уже проанализированных и себя (с защитой от AttributeError)
-                my_did = getattr(self.bluesky_client.me, 'did', None) if hasattr(self.bluesky_client, 'me') and self.bluesky_client.me else None
-                if author.did in analyzed_authors or (my_did and author.did == my_did):
-                    continue
-                    
-                analyzed_authors.add(author.did)
-                
-                try:
-                    # Получаем полный профиль автора для доступа к статистике
-                    async def _get_author_profile(did=author.did):
-                        return await self.bluesky_client.app.bsky.actor.get_profile(
-                            params={'actor': did}
-                        )
+        """Timeline follow source (FOL-001)."""
+        return await self.follow_strategy_orchestrator.from_timeline()
 
-                    full_profile = await self._atproto_execute(_get_author_profile)
-                    
-                    # Теперь у нас есть доступ к полной статистике
-                    description = full_profile.description or ""
-                    followers = full_profile.followers_count if hasattr(full_profile, 'followers_count') else 0
-                    following = full_profile.follows_count if hasattr(full_profile, 'follows_count') else 0
-                    posts_count = full_profile.posts_count if hasattr(full_profile, 'posts_count') else 0
-                    post_engagement = (post.post.like_count or 0) + (post.post.repost_count or 0) * 2
-                    
-                    logger.info(f"🔍 Автор популярного поста: @{full_profile.handle}")
-                    logger.info(f"    Вовлеченность поста: {post_engagement}")
-                    logger.info(f"    Подписчики: {followers}, Посты: {posts_count}")
-                    
-                    # Более мягкие критерии для авторов популярных постов + защита от дубликатов
-                    if (followers > 10 and followers < 50000 and posts_count > 5 and
-                        post_engagement > 50 and
-                        full_profile.did not in self.followed_users):
-
-                        try:
-                            followed_ok = await self.engagement_service.follow(
-                                did=full_profile.did,
-                                handle=full_profile.handle,
-                                source='timeline',
-                            )
-                            if followed_ok:
-                                logger.info(f"➕ Подписка на автора популярного поста @{full_profile.handle}!")
-                                followed += 1
-
-                            try:
-                                self.update_user_relationship(full_profile.did, 'follow', 7)
-                            except Exception as rel_error:
-                                logger.warning(f"⚠️ Ошибка обновления отношений для @{full_profile.handle}: {rel_error}")
-
-                            await asyncio.sleep(random.uniform(4, 8))
-                            
-                        except Exception as e:
-                            logger.error(f"Ошибка подписки на @{full_profile.handle}: {e}")
-                    elif full_profile.did in self.followed_users:
-                        logger.info(f"👥 Уже подписаны на автора @{full_profile.handle}, пропускаем")
-                            
-                except Exception as e:
-                    logger.error(f"Ошибка получения профиля автора @{author.handle}: {e}")
-                    continue
-            
-            logger.info(f"📊 Стратегия популярных авторов:")
-            logger.info(f"    Подписок сделано: {followed}")
-            
-            return followed
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка стратегии популярных авторов: {e}")
-            return 0
-    
     def learn_from_memory(self) -> None:
         """Обучение на основе накопленной памяти"""
         try:

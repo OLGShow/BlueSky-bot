@@ -4,10 +4,10 @@
 **Re-audit agents:** [senior-reviewer](8075bcbb-7df0-4650-ad8e-06f5b3dffe5e) + [repo-organizer](71a36f86-fc13-48ed-a1b4-bc56cb9972c4)  
 **Scope:** code architecture (`app/`) + local file organization
 
-| | Baseline (afternoon) | Re-audit (after Phase 1–2) |
-|--|---------------------:|---------------------------:|
-| **Code health** | Needs Improvement — **5.5/10** | Needs Improvement — **6.5/10** (**+1.0**) |
-| **Layout health** | Good; residual hygiene | **Healthy** (Stages 1–4 closed) |
+| | Baseline (afternoon) | Re-audit (Phase 1–2) | Evening re-score (post Phase 7) |
+|--|---------------------:|---------------------:|--------------------------------:|
+| **Code health** | Needs Improvement — **5.5/10** | Needs Improvement — **6.5/10** (**+1.0**) | Good — **7.5/10** (**+1.0** vs 6.5) |
+| **Layout health** | Good; residual hygiene | **Healthy** (Stages 1–4 closed) | **Healthy** (unchanged) |
 
 ---
 
@@ -87,6 +87,51 @@ Phase 3–6 leftovers from the evening STRAT-003 cycle **closed** (formal re-sco
 | Phase 7 (scheduler / learning / state) | ⬜ Deferred |
 
 Verify: smoke **2/2**; unittest **246** OK (3 skipped). Report: [2026-10-19-strat-families-http-retry-implementation.md](../reports/2026-10-19-strat-families-http-retry-implementation.md).
+
+### Evening re-score — post Phase 7 (2026-10-19 late)
+
+Formal re-score after strategies extract + Phase 7 slices (viral/soft-fail, LEARN/CYCLE, ContentPublishState, heartbeat, cache sync, smart engagement, daily reporting). Commit tip before thin-shell: `31dd92c`. Bot shell at re-score: **~3648 LOC / 104 methods**.
+
+| Area | Phase 1–2 | Post Phase 7 | Δ |
+|------|:---------:|:------------:|:-:|
+| Structure | 7 | **8** | +1 |
+| Dependencies | 7 | **8** | +1 |
+| Scalability | 5 | **6** | +1 |
+| Maintainability | 6 | **7** | +1 |
+| Testability | 7 | **8** | +1 |
+| **Overall** | **6.5** | **7.5** | **+1.0** |
+
+**What moved the needle**
+
+| Closed since 6.5 | Evidence |
+|------------------|----------|
+| Strategy families (news→viral→soft-fail) | `app/strategies/*`; hybrid registry overwrite |
+| RetryPolicy on catalogued outbound I/O | AI + RSS + ATProto/media |
+| Quality pipeline + shared HTTP | `quality_pipeline.py`; formatter/rich_posts session |
+| Phase 7 slices | `strategy_learning`, `bot_cycle`, `content_publish_state`, `heartbeat_monitor`, `engagement_cache_sync`, `smart_engagement`, `daily_reporting` |
+| Hermetic coverage | **294** unittest OK (3 skipped) at Phase 7 close |
+
+**Residuals (cap overall below 8.5)**
+
+| Residual | Sev | Notes |
+|----------|-----|-------|
+| God Object shell still ~3.6k LOC | High | Composition root + `__init__` glue (~356), `create_scheduled_post` (~202) |
+| Relevance / follow / RSS still on bot | Medium | Thin-shell cycle target |
+| Health / media / auth still on bot | Medium | Deferred after relevance/follow/RSS |
+| Dual quality analyzers | Low–Med | Pipeline unifies scheduled path; legacy helpers remain |
+| Layout: local `opt/` size / triple `bot_config` | Low | Documented; optional |
+
+**Thin-shell cycle (same evening — REL/FOL/RSS)**
+
+| Extract | Module | Status |
+|---------|--------|--------|
+| `calculate_relevance` | `relevance_scoring.py` | ✅ |
+| Follow family | `follow_strategy.py` | ✅ |
+| RSS fetch cluster | `rss_content.py` | ✅ |
+
+Bot shell after thin-shell: **~3151 LOC** (was ~3648). Next: `create_scheduled_post`, health/media.
+
+Verify after thin-shell: smoke **2/2**; unittest **306** OK (3 skipped).
 
 ---
 

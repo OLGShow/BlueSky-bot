@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Added
+- Thin bot shell: `relevance_scoring.py`, `follow_strategy.py`, `rss_content.py` (REL/FOL/RSS-001); architecture evening re-score **7.5/10**
+- Hermetic suites: `test_relevance_scoring_rel001`, `test_follow_strategy_fol001`, `test_rss_content_rss001`
 - Phase 7 leftovers: `heartbeat_monitor.py`, `engagement_cache_sync.py`, `smart_engagement.py`, `daily_reporting.py` (HB/CACHE/ENG/DRY)
 - Hermetic suites: `test_heartbeat_monitor_hb001`, `test_engagement_cache_sync_cache001`, `test_smart_engagement_eng001`, `test_daily_reporting_dry001`
 - Soft-fail strategies + duplicate fallback (`soft_fail_posts.py`, SOFT-001…004) + content dedup façade (`content_publish_state.py`, STATE-001)

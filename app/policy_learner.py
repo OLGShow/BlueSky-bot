@@ -36,6 +36,9 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "warm_start_strength": 4,
     "deltas_max": 20,
     "report_path": "reports/learning_report.json",
+    "followers_reward_weight": 0.0,
+    "followers_scale": 5.0,
+    "followers_state_path": "learning_followers.json",
 }
 
 CREDIT_WEIGHTS = {
@@ -49,13 +52,30 @@ def compute_reward(
     replies: float,
     reposts: float,
     reward_scale: float = 10,
+    followers_delta: float | None = None,
+    followers_weight: float = 0.0,
+    followers_scale: float = 5.0,
 ) -> float:
-    """Map engagement counts to reward in [0, 1)."""
+    """Map engagement (+ optional followers delta) to reward in [0, 1)."""
     score = float(likes) + 2.0 * float(replies) + 3.0 * float(reposts)
     scale = float(reward_scale) if reward_scale else 10.0
     if scale <= 0:
         scale = 10.0
-    return 1.0 - math.exp(-score / scale)
+    eng = 1.0 - math.exp(-score / scale)
+    if followers_weight <= 0 or followers_delta is None:
+        return eng
+    f_scale = float(followers_scale) if followers_scale else 5.0
+    if f_scale <= 0:
+        f_scale = 5.0
+    # Clamp delta for stability; positive growth helps.
+    d = max(-f_scale * 3, min(f_scale * 3, float(followers_delta)))
+    if d >= 0:
+        r_f = 1.0 - math.exp(-d / f_scale)
+    else:
+        r_f = -(1.0 - math.exp(d / f_scale))  # negative in (-1, 0]
+    w = min(1.0, max(0.0, float(followers_weight)))
+    blended = (1.0 - w) * eng + w * ((r_f + 1.0) / 2.0)
+    return max(0.0, min(0.999999, blended))
 
 
 def _utc_now_iso() -> str:
@@ -471,6 +491,7 @@ class PolicyLearner:
         reposts,
         replies,
         check_id: str,
+        followers_delta=None,
     ) -> bool:
         """Apply fractional dual-credit. Returns False if arm unknown."""
         arm = self.arms.get(strategy_key)
@@ -486,6 +507,9 @@ class PolicyLearner:
             replies,
             reposts,
             reward_scale=float(self.params["reward_scale"]),
+            followers_delta=followers_delta,
+            followers_weight=float(self.params.get("followers_reward_weight", 0.0)),
+            followers_scale=float(self.params.get("followers_scale", 5.0)),
         )
         arm["alpha"] = float(arm.get("alpha", 1.0)) + w * r
         arm["beta"] = float(arm.get("beta", 1.0)) + w * (1.0 - r)

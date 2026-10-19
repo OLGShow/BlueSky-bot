@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Wave 3 autonomy: followers-delta reward (`FollowerTracker`), weekly allowlisted `LlmRetro`, `SafetyGovernor` gates; report [wave3-autonomous-goal](../develop/reports/2026-10-19-wave3-autonomous-goal.md)
 - Autonomous learning agent Wave 1+2: Thompson `PolicyLearner` (strategy) + FormatBandit + `EngagementLearner` + `AgentDecisionLog` (PLRN); report [autonomous-learning-agent](../develop/reports/2026-10-19-autonomous-learning-agent.md); [ADR-002](../develop/architecture/ADR-002-policy-learner-bandit.md); deploy [checklist](../develop/reports/2026-10-19-learning-deploy-checklist.md)
 - Thin bot shell: `relevance_scoring.py`, `follow_strategy.py`, `rss_content.py` (REL/FOL/RSS-001); architecture evening re-score **7.5/10**
 - Hermetic suites: `test_relevance_scoring_rel001`, `test_follow_strategy_fol001`, `test_rss_content_rss001`

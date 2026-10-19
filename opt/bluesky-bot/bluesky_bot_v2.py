@@ -13,7 +13,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timedelta, timezone
 from collections import Counter, defaultdict
-from typing import List, Dict, Optional, Set, Tuple, Callable
+from typing import Any, List, Dict, Optional, Set, Tuple, Callable
 import aiohttp
 import feedparser
 from atproto import AsyncClient, models
@@ -34,11 +34,13 @@ from policy_learner import (
     recent_format_keys_24h,
     recent_strategy_keys_24h,
 )
+from follower_tracker import FollowerTracker, delta_between
 from engagement_learner import (
     EngagementLearner,
     eligible_engagement_catch_up_checks,
 )
 from agent_decision_log import AgentDecisionLog
+from llm_retro import LlmRetro
 
 # Новые импорты для форматирования
 from bluesky_post_formatter import BlueskyPostFormatter, PostTemplates, RichTextPost
@@ -68,6 +70,7 @@ from resilience_service import (
     OutboundRetryPolicies,
     build_outbound_retry_policies,
 )
+from safety_governor import SafetyGovernor, SafetyStatus
 from log_sanitizer import SanitizingFilter
 from engagement_ports import (
     DryRunGate,
@@ -590,6 +593,11 @@ class AutonomousBlueskyBotV2:
             action_costs=budget_cfg.get('action_costs'),
         )
 
+        # Safety governor (PLRN-022): pause credit/sync/publish on risk signals
+        self.safety_governor = SafetyGovernor(
+            self.config.get('safety_governor', {})
+        )
+
         # Growth Engine
         self.dry_run = os.getenv('DRY_RUN', 'false').lower() in ('true', '1', 'yes')
         self.dry_run_log = DryRunAction() if self.dry_run else None
@@ -697,6 +705,10 @@ class AutonomousBlueskyBotV2:
             bootstrap_weights=boot,
         )
         self.policy_learner.sync_arms_with_config(arms, boot)
+        # FollowerTracker (PLRN-020): own-account followers snapshots for reward
+        self.follower_tracker = FollowerTracker(
+            path=lp.get('followers_state_path', 'learning_followers.json')
+        )
         # FormatBandit (PLRN-010): Thompson over format_a/format_b
         fl = self.config.get('format_learning', {}) or {}
         if fl.get('enabled', True):
@@ -723,6 +735,15 @@ class AutonomousBlueskyBotV2:
         self.decision_log = AgentDecisionLog(
             path=lp.get("decision_log_path", "reports/agent_decisions.jsonl"),
             max_lines=int(lp.get("decision_log_max_lines", 10000)),
+        )
+        # LlmRetro (PLRN-021): weekly allowlisted learning_parameters reflection
+        retro_cfg = self.config.get("llm_retro", {}) or {}
+        self._llm_retro_enabled = bool(retro_cfg.get("enabled", False))
+        self._llm_retro_interval_days = int(retro_cfg.get("interval_days", 7) or 7)
+        self.llm_retro = LlmRetro(
+            state_path=retro_cfg.get("state_path", "learning_retro_state.json"),
+            report_dir=retro_cfg.get("report_dir", "reports"),
+            dry_run=bool(retro_cfg.get("dry_run", False)),
         )
         # Soft-fail duplicate replacement chain (SOFT-003; needs registry)
         self.duplicate_fallback_helper = DuplicateFallbackHelper(
@@ -1144,6 +1165,45 @@ class AutonomousBlueskyBotV2:
             )
         return registry
 
+    def _safety_status(self) -> SafetyStatus:
+        """Gather budget / circuit / follower / error signals for SafetyGovernor."""
+        gov = getattr(self, "safety_governor", None)
+        if gov is None:
+            return SafetyStatus(ok=True)
+
+        circuit_open: dict[str, bool] = {}
+        for key, attr in (("bluesky", "_cb_bluesky"), ("ai", "_cb_ai")):
+            cb = getattr(self, attr, None)
+            if cb is None:
+                continue
+            if hasattr(cb, "is_open"):
+                circuit_open[key] = bool(cb.is_open)
+            else:
+                circuit_open[key] = getattr(cb, "state", "") == "open"
+
+        budget_summary = None
+        budget = getattr(self, "activity_budget", None)
+        if budget is not None and hasattr(budget, "summary"):
+            try:
+                budget_summary = budget.summary()
+            except Exception:
+                budget_summary = None
+
+        followers_delta_1h = None
+        tracker = getattr(self, "follower_tracker", None)
+        if tracker is not None and hasattr(tracker, "delta_1h"):
+            try:
+                followers_delta_1h = tracker.delta_1h()
+            except Exception:
+                followers_delta_1h = None
+
+        return gov.evaluate(
+            budget_summary=budget_summary,
+            circuit_open=circuit_open or None,
+            followers_delta_1h=followers_delta_1h,
+            consecutive_errors=int(getattr(self, "_consecutive_errors", 0) or 0),
+        )
+
     def _build_engagement_ports(self) -> EngagementPorts:
         """Composition-root wiring: bot attrs → EngagementPorts (no service→bot)."""
         budget = getattr(self, 'activity_budget', None)
@@ -1486,6 +1546,15 @@ class AutonomousBlueskyBotV2:
     async def create_scheduled_post(self) -> None:
         """ИСПРАВЛЕННОЕ создание запланированного поста с контролем качества и динамическими весами"""
         try:
+            # SafetyGovernor gate — pause publish on risk signals (PLRN-022)
+            _sg = self._safety_status()
+            if not _sg.can_publish:
+                logger.info(
+                    "🛡️ SafetyGovernor: publish blocked — %s",
+                    ", ".join(_sg.reasons) or "unknown",
+                )
+                return
+
             # Budget gate — check before any generation work
             if not self.activity_budget.can_spend('post'):
                 logger.info("📊 Activity budget exhausted for posting — skipping cycle")
@@ -1650,6 +1719,8 @@ class AutonomousBlueskyBotV2:
                 self.session_stats['posts_created'] += 1
                 self.daily_post_count += 1
                 logger.info(f"✅ Опубликован качественный пост #{self.daily_post_count}: {post.text[:80].replace(chr(10), ' ')}...")
+
+                followers_at_publish = await self.refresh_followers_count()
                 
                 # УЛУЧШЕННОЕ сохранение для анализа с вирусными метриками
                 content_hash = self._generate_content_hash(post.text, url, image_url)
@@ -1673,6 +1744,8 @@ class AutonomousBlueskyBotV2:
                     'actual_engagement': 0,
                     **successful_post_bandit_fields(strategy_key),
                 }
+                if followers_at_publish is not None:
+                    post_data['followers_at_publish'] = followers_at_publish
                 
                 self.memory.successful_posts.append(post_data)
                 
@@ -2167,6 +2240,13 @@ class AutonomousBlueskyBotV2:
     
     async def smart_engagement(self) -> None:
         """Умное взаимодействие (ENG-001 → SmartEngagementOrchestrator)."""
+        _sg = self._safety_status()
+        if not _sg.can_engagement:
+            logger.info(
+                "🛡️ SafetyGovernor: engagement blocked — %s",
+                ", ".join(_sg.reasons) or "unknown",
+            )
+            return
         cfg = SmartEngagementConfig.from_bot_config(
             self.config,
             max_interactions=self.max_interactions_per_cycle,
@@ -2231,6 +2311,12 @@ class AutonomousBlueskyBotV2:
             await self.catch_up_pending_credits()
         except Exception as e:
             logger.error(f"Ошибка startup catch-up credits: {e}")
+
+        # PLRN-021: weekly LLM retro over learning_parameters (allowlisted)
+        try:
+            await self.maybe_run_llm_retro()
+        except Exception as e:
+            logger.error(f"Ошибка llm_retro: {e}")
 
         cycle_count = 0
         last_post_time = datetime.now() - timedelta(hours=2)  # Начинаем с большой паузы
@@ -2442,6 +2528,53 @@ class AutonomousBlueskyBotV2:
         # Сохраняем обновленную память
         self.memory.save()
     
+    async def refresh_followers_count(self) -> Optional[int]:
+        """Fetch own followers_count, record snapshot, return count."""
+        handle = (self.handle or "").strip()
+        if not handle or not getattr(self, "bluesky_client", None):
+            return None
+        try:
+            async def _inner():
+                return await self.bluesky_client.app.bsky.actor.get_profile(
+                    params={"actor": handle}
+                )
+
+            profile = await self._atproto_execute(_inner)
+            count = getattr(profile, "followers_count", None)
+            if count is None:
+                return None
+            count_i = int(count)
+            tracker = getattr(self, "follower_tracker", None)
+            if tracker is not None:
+                tracker.record(count_i)
+            return count_i
+        except Exception as e:
+            logger.warning(
+                "⚠️ Failed to refresh followers count: %s",
+                str(e)[:80],
+            )
+            return None
+
+    def _followers_delta_for_post(
+        self,
+        post: dict,
+        now_count: Optional[int] = None,
+    ) -> Optional[float]:
+        """Delta since ``followers_at_publish``; None if baseline missing."""
+        base = post.get("followers_at_publish")
+        if base is None:
+            return None
+        current = now_count
+        if current is None:
+            tracker = getattr(self, "follower_tracker", None)
+            current = tracker.latest() if tracker is not None else None
+        if current is None:
+            return None
+        try:
+            return float(delta_between(base, current))
+        except (TypeError, ValueError):
+            return None
+
     async def catch_up_pending_credits(self) -> None:
         """Startup catch-up: fetch metrics + credit missed 6h/24h checks."""
         now = datetime.now(timezone.utc)
@@ -2450,6 +2583,14 @@ class AutonomousBlueskyBotV2:
         scanned = 0
         credited_n = 0
         format_credited_n = 0
+        _sg = self._safety_status()
+        if not _sg.can_credit:
+            logger.info(
+                "🛡️ SafetyGovernor: credit blocked — %s",
+                ", ".join(_sg.reasons) or "unknown",
+            )
+
+        followers_now = await self.refresh_followers_count()
 
         for post in self.memory.successful_posts:
             checks = eligible_catch_up_checks(post, now)
@@ -2480,8 +2621,13 @@ class AutonomousBlueskyBotV2:
                 post['engagement_rate'] = metrics.get('engagement_rate')
 
             rewarded = post.setdefault('rewarded_checks', [])
+            followers_delta = self._followers_delta_for_post(
+                post, now_count=followers_now
+            )
             for check_id in checks:
                 if check_id in rewarded:
+                    continue
+                if not _sg.can_credit:
                     continue
                 ok = self.policy_learner.credit(
                     strategy_key,
@@ -2489,6 +2635,7 @@ class AutonomousBlueskyBotV2:
                     post['reposts'],
                     post['replies'],
                     check_id,
+                    followers_delta=followers_delta,
                 )
                 if ok:
                     rewarded.append(check_id)
@@ -2508,6 +2655,8 @@ class AutonomousBlueskyBotV2:
                 fmt_rewarded = post.setdefault('format_rewarded_checks', [])
                 for check_id in fmt_checks:
                     if check_id in fmt_rewarded:
+                        continue
+                    if not _sg.can_credit:
                         continue
                     ok = self.format_bandit.credit(
                         ab_fmt,
@@ -2533,8 +2682,14 @@ class AutonomousBlueskyBotV2:
             await asyncio.sleep(0.5)
 
         if any_credited:
-            self.policy_learner.sync_config_weights(self._config_path)
-            self.config['post_strategies'] = self.policy_learner.export_weights()
+            if _sg.can_sync_config:
+                self.policy_learner.sync_config_weights(self._config_path)
+                self.config['post_strategies'] = self.policy_learner.export_weights()
+            else:
+                logger.info(
+                    "🛡️ SafetyGovernor: config sync blocked — %s",
+                    ", ".join(_sg.reasons) or "unknown",
+                )
             self.policy_learner.save()
 
         if any_format_credited and self.format_bandit is not None:
@@ -2554,6 +2709,95 @@ class AutonomousBlueskyBotV2:
 
         await self.catch_up_engagement_credits()
 
+    async def maybe_run_llm_retro(self) -> None:
+        """Weekly LLM reflection: propose/apply allowlisted learning_parameters tweaks."""
+        retro = getattr(self, "llm_retro", None)
+        if not retro or not getattr(self, "_llm_retro_enabled", False):
+            return
+        interval = int(getattr(self, "_llm_retro_interval_days", 7) or 7)
+        if not retro.should_run(interval_days=interval):
+            return
+
+        report: dict = {}
+        decisions: list = []
+        try:
+            pl = getattr(self, "policy_learner", None)
+            if pl is not None:
+                report = pl.report()
+            log = getattr(self, "decision_log", None)
+            if log is not None:
+                decisions = log.recent(50)
+        except Exception as exc:
+            logger.warning("llm_retro gather context failed: %s", exc)
+
+        async def _generate_json(prompt: str) -> dict:
+            ai = getattr(self, "pollinations_ai", None)
+            if ai is None or not hasattr(ai, "generate_content"):
+                return {}
+            raw = await ai.generate_content(
+                prompt,
+                model_key="smart",
+                json_output=True,
+            )
+            if not raw or not isinstance(raw, str):
+                return {}
+            text = raw.strip()
+            if text.startswith("```"):
+                text = re.sub(r"^```(?:json)?\s*", "", text)
+                text = re.sub(r"\s*```$", "", text)
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                match = re.search(r"\{.*\}", text, re.DOTALL)
+                if not match:
+                    return {}
+                try:
+                    data = json.loads(match.group(0))
+                except json.JSONDecodeError:
+                    return {}
+            return data if isinstance(data, dict) else {}
+
+        patch: dict = {}
+        raw_for_report: Any = None
+        try:
+            patch = await retro.propose(_generate_json, report, decisions)
+            raw_for_report = patch
+        except Exception as exc:
+            logger.warning("llm_retro propose failed: %s", exc)
+            patch = {}
+
+        applied = False
+        if patch and not retro.dry_run:
+            config_path = getattr(self, "_config_path", None) or "bot_config.json"
+            try:
+                applied = bool(retro.apply_patch(config_path, patch))
+            except Exception as exc:
+                logger.warning("llm_retro apply_patch failed: %s", exc)
+                applied = False
+            if applied:
+                lp = self.config.setdefault("learning_parameters", {})
+                if not isinstance(lp, dict):
+                    lp = {}
+                    self.config["learning_parameters"] = lp
+                for key, value in patch.items():
+                    lp[key] = value
+                    if hasattr(self, "policy_learner") and isinstance(
+                        getattr(self.policy_learner, "params", None), dict
+                    ):
+                        self.policy_learner.params[key] = value
+
+        report_path = retro.write_suggestion_report(
+            patch, raw=raw_for_report, applied=applied
+        )
+        retro.mark_ran()
+        logger.info(
+            "🧠 LLM retro: patch_keys=%s applied=%s dry_run=%s report=%s",
+            sorted(patch.keys()) if patch else [],
+            applied,
+            retro.dry_run,
+            report_path,
+        )
+
     async def catch_up_engagement_credits(self) -> None:
         """Startup catch-up for engagement_actions topic-arm credits (PLRN-011)."""
         eng = getattr(self, "engagement_learner", None)
@@ -2567,6 +2811,12 @@ class AutonomousBlueskyBotV2:
         any_credited = False
         scanned = 0
         credited_n = 0
+        _sg = self._safety_status()
+        if not _sg.can_credit:
+            logger.info(
+                "🛡️ SafetyGovernor: credit blocked — %s",
+                ", ".join(_sg.reasons) or "unknown",
+            )
 
         for action in actions:
             checks = eligible_engagement_catch_up_checks(action, now)
@@ -2591,6 +2841,8 @@ class AutonomousBlueskyBotV2:
             rewarded = action.setdefault("rewarded_checks", [])
             for check_id in checks:
                 if check_id in rewarded:
+                    continue
+                if not _sg.can_credit:
                     continue
                 ok = eng.credit(topic, likes, replies, reposts, check_id)
                 if ok:
@@ -2643,11 +2895,21 @@ class AutonomousBlueskyBotV2:
         replies = performance.get("replies", 0)
         actions = getattr(self.memory, "engagement_actions", None) or []
         any_ok = False
+        _sg = self._safety_status()
+        blocked_logged = False
         for action in actions:
             if action.get("uri") != post_uri:
                 continue
             rewarded = action.setdefault("rewarded_checks", [])
             if check_id in rewarded:
+                continue
+            if not _sg.can_credit:
+                if not blocked_logged:
+                    logger.info(
+                        "🛡️ SafetyGovernor: credit blocked — %s",
+                        ", ".join(_sg.reasons) or "unknown",
+                    )
+                    blocked_logged = True
                 continue
             topic = action.get("topic") or "_other"
             if eng.credit(topic, likes, replies, reposts, check_id):
@@ -2723,26 +2985,52 @@ class AutonomousBlueskyBotV2:
                     strategy_key = post.get('strategy_key')
                     rewarded = post.setdefault('rewarded_checks', [])
                     memory_dirty = False
-                    if (
-                        strategy_key
+                    _sg = self._safety_status()
+                    want_strategy = (
+                        bool(strategy_key)
                         and post.get('type') != 'comment'
                         and check_id not in rewarded
-                    ):
+                    )
+                    want_format = (
+                        self.format_bandit is not None
+                        and bool(ab_fmt)
+                        and post.get('type') != 'comment'
+                        and check_id
+                        not in post.get('format_rewarded_checks', [])
+                    )
+                    if (want_strategy or want_format) and not _sg.can_credit:
+                        logger.info(
+                            "🛡️ SafetyGovernor: credit blocked — %s",
+                            ", ".join(_sg.reasons) or "unknown",
+                        )
+                    if want_strategy and _sg.can_credit:
+                        followers_now = await self.refresh_followers_count()
+                        followers_delta = self._followers_delta_for_post(
+                            post, now_count=followers_now
+                        )
                         credited = self.policy_learner.credit(
                             strategy_key,
                             post['likes'],
                             post['reposts'],
                             post['replies'],
                             check_id,
+                            followers_delta=followers_delta,
                         )
                         if credited:
                             rewarded.append(check_id)
-                            self.policy_learner.sync_config_weights(
-                                self._config_path
-                            )
-                            self.config['post_strategies'] = (
-                                self.policy_learner.export_weights()
-                            )
+                            if _sg.can_sync_config:
+                                self.policy_learner.sync_config_weights(
+                                    self._config_path
+                                )
+                                self.config['post_strategies'] = (
+                                    self.policy_learner.export_weights()
+                                )
+                            else:
+                                logger.info(
+                                    "🛡️ SafetyGovernor: config sync "
+                                    "blocked — %s",
+                                    ", ".join(_sg.reasons) or "unknown",
+                                )
                             self.policy_learner.save()
                             memory_dirty = True
                             logger.info(
@@ -2756,35 +3044,30 @@ class AutonomousBlueskyBotV2:
                             )
 
                     # FormatBandit credit (separate format_rewarded_checks)
-                    if (
-                        self.format_bandit is not None
-                        and ab_fmt
-                        and post.get('type') != 'comment'
-                    ):
+                    if want_format and _sg.can_credit:
                         fmt_rewarded = post.setdefault(
                             'format_rewarded_checks', []
                         )
-                        if check_id not in fmt_rewarded:
-                            fmt_ok = self.format_bandit.credit(
+                        fmt_ok = self.format_bandit.credit(
+                            ab_fmt,
+                            post['likes'],
+                            post['reposts'],
+                            post['replies'],
+                            check_id,
+                        )
+                        if fmt_ok:
+                            fmt_rewarded.append(check_id)
+                            self.format_bandit.save()
+                            memory_dirty = True
+                            logger.info(
+                                "🧠 FormatBandit credit %s arm=%s "
+                                "likes=%s reposts=%s replies=%s",
+                                check_id,
                                 ab_fmt,
                                 post['likes'],
                                 post['reposts'],
                                 post['replies'],
-                                check_id,
                             )
-                            if fmt_ok:
-                                fmt_rewarded.append(check_id)
-                                self.format_bandit.save()
-                                memory_dirty = True
-                                logger.info(
-                                    "🧠 FormatBandit credit %s arm=%s likes=%s "
-                                    "reposts=%s replies=%s",
-                                    check_id,
-                                    ab_fmt,
-                                    post['likes'],
-                                    post['reposts'],
-                                    post['replies'],
-                                )
 
                     if memory_dirty:
                         self.memory.save()
@@ -2859,9 +3142,22 @@ class AutonomousBlueskyBotV2:
                     float(snap.get('total_credit_mass') or 0.0),
                     report_path,
                 )
+                # Periodic followers snapshot (PLRN-020); fire-and-forget if loop running
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self.refresh_followers_count())
+                except RuntimeError:
+                    pass
             pl.save()
         except Exception as e:
             logger.error(f"Ошибка PolicyLearner tick: {e}")
+        try:
+            fb = getattr(self, "format_bandit", None)
+            if fb is not None:
+                fb.maybe_decay()
+                fb.save()
+        except Exception as e:
+            logger.error(f"Ошибка FormatBandit tick: {e}")
         try:
             eng = getattr(self, "engagement_learner", None)
             if eng and eng.enabled:

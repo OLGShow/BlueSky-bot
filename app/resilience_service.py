@@ -86,6 +86,11 @@ class CircuitBreaker:
                 self._state = 'half_open'
         return self._state
 
+    @property
+    def is_open(self) -> bool:
+        """True while requests are blocked (open, not half-open probe)."""
+        return self.state == 'open'
+
     def record_success(self) -> None:
         self._failures = 0
         if self._state in ('half_open', 'open'):

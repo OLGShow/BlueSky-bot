@@ -190,7 +190,10 @@
     "weight_min": 0.05,
     "warm_start_strength": 4,
     "deltas_max": 20,
-    "state_path": "learning_state.json"
+    "state_path": "learning_state.json",
+    "followers_reward_weight": 0.15,
+    "followers_scale": 5,
+    "followers_state_path": "learning_followers.json"
   },
   "format_learning": {
     "enabled": true,
@@ -204,5 +207,17 @@
     "epsilon": 0.10,
     "state_path": "learning_state_engagement.json",
     "action_credit_delays_hours": [6, 24]
+  },
+  "safety_governor": {
+    "enabled": true,
+    "min_budget_ratio": 0.05,
+    "followers_shock_abs": 50,
+    "max_consecutive_errors": 5
+  },
+  "llm_retro": {
+    "enabled": true,
+    "interval_days": 7,
+    "state_path": "learning_retro_state.json",
+    "dry_run": false
   }
 }

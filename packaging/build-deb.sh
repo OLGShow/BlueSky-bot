@@ -53,11 +53,14 @@ PYFILES=(
     engagement_ports.py
     engagement_service.py
     follow_strategy.py
+    follower_tracker.py
     growth_engine.py
     heartbeat_monitor.py
     post_strategies.py
     http_session.py
     log_sanitizer.py
+    llm_retro.py
+    safety_governor.py
     openrouter_adapter.py
     pollinations_adapter.py
     policy_learner.py

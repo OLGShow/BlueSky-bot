@@ -24,6 +24,7 @@ Tests:
  19. REF-001 PostStrategy helper (_quality_theme_post) via AST (hermetic)
  20. SMOKE-001 post-deploy hermetic smoke (imports, config, DRY_RUN, fail-fast)
  21. PLRN-008 learning smoke (PolicyLearner ×3 domains + AgentDecisionLog, tmpdir)
+ 22. Wave3 smoke (FollowerTracker + LlmRetro validate + SafetyGovernor)
 
 Run:
   python verify_bot.py              # full hardening suite
@@ -414,6 +415,48 @@ def test_smoke_learning_plrn008():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+@test("Wave3: FollowerTracker + LlmRetro + SafetyGovernor (tmpdir, no network)")
+def test_smoke_learning_wave3():
+    """Hermetic Wave 3 smoke: followers tracker, retro allowlist, safety gates."""
+    from follower_tracker import FollowerTracker, delta_between
+    from llm_retro import LlmRetro
+    from safety_governor import SafetyGovernor
+
+    tmpdir = tempfile.mkdtemp(prefix="wave3_smoke_")
+    try:
+        tracker = FollowerTracker(path=os.path.join(tmpdir, "followers.json"))
+        tracker.record(100)
+        tracker.record(103)
+        assert tracker.latest() == 103
+        assert delta_between(100, 103) == 3
+
+        retro = LlmRetro(
+            state_path=os.path.join(tmpdir, "retro_state.json"),
+            report_dir=os.path.join(tmpdir, "reports"),
+        )
+        assert retro.should_run(interval_days=7) is True
+        patch = retro.parse_and_validate({"epsilon": 0.2, "evil_key": 1})
+        assert "epsilon" in patch and "evil_key" not in patch
+
+        gov = SafetyGovernor({"enabled": True, "followers_shock_abs": 50})
+        ok = gov.evaluate(
+            budget_summary={"hourly": {"used": 0, "limit": 100}, "remaining_hourly": 100},
+            circuit_open={"bluesky": False, "ai": False},
+            followers_delta_1h=0,
+            consecutive_errors=0,
+        )
+        assert ok.can_publish and ok.can_credit
+        blocked = gov.evaluate(
+            budget_summary=None,
+            circuit_open={"bluesky": True, "ai": False},
+            followers_delta_1h=0,
+            consecutive_errors=0,
+        )
+        assert blocked.can_publish is False
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 # --- 8. SingleInstanceLock ---
 
 @test("SingleInstanceLock: acquire + release + stale detection")
@@ -603,6 +646,7 @@ _SMOKE_TEST_NAMES = (
     "test_imports",
     "test_smoke_smoke001",
     "test_smoke_learning_plrn008",
+    "test_smoke_learning_wave3",
 )
 
 

@@ -71,8 +71,25 @@ Stable registry / learning keys (do not rename):
 - ``_create_quality_tip_post``
 - ``_create_quality_discussion``
 
-Deferred (not in this ports surface yet): ``_create_viral_hot_take``,
-``_create_trending_commentary`` — same ThemePostHelper pattern, next extract.
+===========================================================================
+Deps inventory: viral / trending (STRAT-009)
+===========================================================================
+
+| Bot call / field (today)                              | Port / field here                 | Role |
+|-------------------------------------------------------|-----------------------------------|------|
+| ``engagement_optimizer.generate_viral_post_prompts``  | ``ViralPromptsPort.generate``     | Side-effect parity (list unused in prompt today) |
+| ``generate_structured_post_content(prompt, …)``       | ``StructuredContentPort``         | LLM JSON post_text + hashtags |
+| ``_create_post_with_image_generation``                | ``ImagePostHelper`` via ports     | Image + formatter glue |
+| theme/topic random lists                              | strategy module constants         | hot-take / trending themes |
+
+Stable registry / learning keys (do not rename):
+
+- ``_create_viral_hot_take``
+- ``_create_trending_commentary``
+
+Deferred (not in this ports surface): soft-fail helpers
+``_create_motivational_moment_post``, ``_create_emergency_unique_post``,
+``_create_fallback_post_for_duplicate`` (partially covered by ``FallbackPostPort``).
 
 Import rules (ADR invariants):
 - This module must not import ``bluesky_bot_v2`` or application services.
@@ -499,3 +516,38 @@ class DynamicPostsPorts:
     dynamic: DynamicContentPort
     image: ImagePostPorts
     emergency: FallbackPostPort
+
+
+# --- Viral prompts (STRAT-009 / STRAT-010) ---
+
+
+@runtime_checkable
+class ViralPromptsPort(Protocol):
+    """Produce viral-style prompt templates (engagement optimizer parity)."""
+
+    def generate(self) -> Sequence[str]:
+        """Return prompt strings (may be unused by the hot-take body today)."""
+        ...
+
+
+@dataclass
+class CallableViralPrompts:
+    """Binds ``EngagementOptimizer.generate_viral_post_prompts``-shaped callable."""
+
+    _generate: Callable[[], Sequence[str]]
+
+    def generate(self) -> Sequence[str]:
+        return self._generate()
+
+
+@dataclass
+class ViralPostsPorts:
+    """Dependencies for viral hot-take / trending commentary (STRAT-010).
+
+    Bot (composition root) builds one instance and injects it; strategy modules
+    must not import ``bluesky_bot_v2``.
+    """
+
+    content: StructuredContentPort
+    image: ImagePostPorts
+    viral_prompts: ViralPromptsPort

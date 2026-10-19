@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Added
+- Viral/trending strategies (`viral_posts.py`, STRAT-009…011) + Phase 7 slices: `strategy_learning.py` (LEARN-001), `bot_cycle.BotCycleRunner` (CYCLE-001)
+- Hermetic suites: `test_viral_strategies_strat010`, `test_strategy_learning_learn001`, `test_bot_cycle_cycle001`
 - Strategy families extract — `ImagePostHelper` + dynamic / theme / poll / insight+prediction (`STRAT-004`…`008`); hybrid registry overwrite for remaining default-weight keys
 - Hermetic strategy/HTTP/retry suites: `test_image_post_helper_strat004`, `test_dynamic_posts_strat005`, `test_theme_posts_strat006`, `test_quality_poll_strategy_strat007`, `test_insight_posts_strat008`, `test_http_session_http002`, `test_retry_policy_retry003`
 - Strategy package `app/strategies/` — `QualityNewsStrategy` + news ports; hybrid registry overwrite for `_create_quality_news_post` (STRAT-001…003)
@@ -32,7 +34,8 @@
 - ATProto + media upload paths use `retry_atproto` / `retry_media_upload` via `RetryPolicy.execute` (RETRY-003); Phase 4 outbound retry complete for catalogued I/O
 - OpenRouter / Pollinations use injected shared `ClientSession` + `RetryPolicy.execute`; RSS GET via `_http_get_text_with_retry` (RETRY-002 / HTTP-001)
 - Packaging sync includes `strategies/` package dir + `quality_pipeline.py` under `opt/` (8 strategy modules mirrored)
-- Full `post_strategies` registry registration + `create_scheduled_post` dispatch via `weighted_entries` / `resolve` (STRAT-001 / STRAT-002); news + dynamic/theme/poll/insight+prediction extracted; viral/soft-fail leftovers deferred
+- Full `post_strategies` registry registration + `create_scheduled_post` dispatch via `weighted_entries` / `resolve` (STRAT-001 / STRAT-002); news + dynamic/theme/poll/insight/prediction/viral extracted; soft-fail leftovers deferred
+- Packaging sync includes `bot_cycle.py` / `strategy_learning.py` + `strategies/` under `opt/`
 - Packaging sync includes `content_ports.py` (and prior `engagement_ports.py` / `post_strategies.py`) mirrors under `opt/`
 - Single systemd unit SoT (`systemd/bluesky-bot.service`); `build-deb.sh` copies unit via `cp` (LAY-003)
 - `opt/bluesky-bot/env.example` aligned with root SoT (LAY-002)

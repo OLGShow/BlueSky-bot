@@ -127,12 +127,14 @@ from strategies.ports import (
     CallablePostFactory,
     CallableRssHeadlines,
     CallableStructuredContent,
+    CallableViralPrompts,
     DynamicPostsPorts,
     ImagePostPorts,
     LiveRssFeeds,
     NewsStrategyPorts,
     PollStrategyPorts,
     ThemePostPorts,
+    ViralPostsPorts,
 )
 from strategies.quality_news import STRATEGY_NAME, QualityNewsStrategy
 from strategies.theme_posts import (
@@ -141,6 +143,14 @@ from strategies.theme_posts import (
     QualityAiInsightStrategy,
     QualityListStrategy,
 )
+from strategies.viral_posts import (
+    TRENDING_COMMENTARY_STRATEGY_NAME,
+    VIRAL_HOT_TAKE_STRATEGY_NAME,
+    TrendingCommentaryStrategy,
+    ViralHotTakeStrategy,
+)
+from bot_cycle import BotCycleRunner, CallableBotCyclePorts, TickResult
+from strategy_learning import apply_strategy_weights_from_outcomes
 
 # Настройка логирования с абсолютным путем
 import sys
@@ -608,8 +618,18 @@ class AutonomousBlueskyBotV2:
         self.quality_poll_strategy = QualityPollStrategy(
             self._build_poll_strategy_ports()
         )
+        # Viral / trending family (STRAT-010); registry prefers instances
+        self._viral_posts_ports = self._build_viral_posts_ports()
+        self.viral_hot_take_strategy = ViralHotTakeStrategy(
+            self._viral_posts_ports
+        )
+        self.trending_commentary_strategy = TrendingCommentaryStrategy(
+            self._viral_posts_ports
+        )
         # Hybrid registry: extracted strategies + bound methods for the rest.
         self.post_strategy_registry = self._build_post_strategy_registry()
+        # Phase 7: one-tick cycle runner (CYCLE-001)
+        self.bot_cycle_runner = BotCycleRunner(self._build_bot_cycle_ports())
         if self.dry_run:
             logger.info("🧪 DRY-RUN режим: никакие действия не будут выполнены")
 
@@ -658,6 +678,78 @@ class AutonomousBlueskyBotV2:
             poll=CallablePollFactory(self.formatter.create_poll),
         )
 
+    def _build_viral_posts_ports(self) -> ViralPostsPorts:
+        """Composition-root wiring: bot attrs → ViralPostsPorts (STRAT-010)."""
+        return ViralPostsPorts(
+            content=CallableStructuredContent(self.generate_structured_post_content),
+            image=self._image_post_ports,
+            viral_prompts=CallableViralPrompts(
+                self.engagement_optimizer.generate_viral_post_prompts
+            ),
+        )
+
+    def _sync_duplicate_caches_to_memory(self) -> None:
+        """Persist duplicate-protection caches into BotMemory (CYCLE-001)."""
+        self.memory.commented_posts_cache = self.commented_posts
+        self.memory.recent_comments_cache = self.recent_comments[-20:]
+        self.memory.liked_posts_cache = self.liked_posts
+        self.memory.reposted_posts_cache = self.reposted_posts
+        self.memory.followed_users_cache = self.followed_users
+        self.memory.last_update = datetime.now()
+
+    def _rotate_rss_for_cycle(self) -> None:
+        """RSS rotation + active URL refresh (CYCLE-001 adapter)."""
+        self.rss_manager.rotate()
+        self.rss_feeds = self.rss_manager.get_active_urls()
+        logger.info(
+            "📡 Active RSS: %s, probation: %s",
+            len(self.rss_feeds),
+            len(self.rss_manager.get_probation_urls()),
+        )
+
+    def _generate_and_save_daily_report(self) -> None:
+        """Daily report + AB persist + dry-run flush (CYCLE-001 adapter)."""
+        report = generate_daily_report(self.session_stats, self.memory, self.config)
+        save_daily_report(report)
+        self.memory.ab_results = self.ab_engine.results
+        if self.dry_run and self.dry_run_log:
+            self.dry_run_log.save()
+
+    def _build_bot_cycle_ports(self) -> CallableBotCyclePorts:
+        """Composition-root wiring: bot attrs → BotCyclePorts (CYCLE-001)."""
+        return CallableBotCyclePorts(
+            _update_heartbeat=self._update_heartbeat,
+            _reset_consecutive_errors=lambda: setattr(self, "_consecutive_errors", 0),
+            _engagement_mode=lambda: self.config.get("engagement_mode", "open"),
+            _smart_engagement=self.smart_engagement,
+            _follow_strategy=self.follow_strategy,
+            _post_interval_minutes=lambda: float(self.post_interval[0]),
+            _is_posting_window=self._is_posting_window,
+            _create_scheduled_post=self.create_scheduled_post,
+            _update_posts_with_real_metrics=self.update_posts_with_real_metrics,
+            _learn_from_memory=self.learn_from_memory,
+            _trim_in_memory_caches=self._trim_in_memory_caches,
+            _sync_duplicate_caches_to_memory=self._sync_duplicate_caches_to_memory,
+            _save_memory=self.memory.save,
+            _session_stats=lambda: self.session_stats,
+            _daily_post_counts=lambda: (
+                int(self.daily_post_count),
+                int(self.max_posts_per_day),
+            ),
+            _cleanup_old_content_hashes=self._cleanup_old_content_hashes,
+            _cleanup_old_commented_posts=self._cleanup_old_commented_posts,
+            _compact_action_ledger=self.action_ledger.compact,
+            _cleanup_log_budget=lambda: _cleanup_log_budget(
+                log_dir, LOG_TOTAL_BUDGET_BYTES
+            ),
+            _rotate_rss=self._rotate_rss_for_cycle,
+            _generate_and_save_daily_report=self._generate_and_save_daily_report,
+            _analyze_post_diversity=self.analyze_post_diversity,
+            _health_monitor=self.health_monitor,
+            _emergency_recovery=self.emergency_recovery,
+            _persist_session=self._persist_session,
+        )
+
     def _build_content_ports(self) -> ContentPorts:
         """Composition-root wiring: bot attrs → ContentPorts (no service→bot)."""
         return ContentPorts(
@@ -693,7 +785,7 @@ class AutonomousBlueskyBotV2:
                 registered = list(registered) + [STRATEGY_NAME]
                 missing = [n for n in missing if n != STRATEGY_NAME]
 
-        # STRAT-005..008: dynamic / theme / poll / insight / prediction.
+        # STRAT-005..010: dynamic / theme / poll / insight / prediction / viral.
         extracted_overwrites = (
             (PERSONAL_OPINION_STRATEGY_NAME, self.personal_opinion_strategy),
             (QUALITY_TIP_STRATEGY_NAME, self.quality_tip_strategy),
@@ -703,6 +795,8 @@ class AutonomousBlueskyBotV2:
             (POLL_STRATEGY_NAME, self.quality_poll_strategy),
             (PERSONAL_INSIGHT_STRATEGY_NAME, self.personal_insight_strategy),
             (PREDICTION_STRATEGY_NAME, self.prediction_strategy),
+            (VIRAL_HOT_TAKE_STRATEGY_NAME, self.viral_hot_take_strategy),
+            (TRENDING_COMMENTARY_STRATEGY_NAME, self.trending_commentary_strategy),
         )
         for name, strategy in extracted_overwrites:
             if name not in names:
@@ -1713,85 +1807,12 @@ class AutonomousBlueskyBotV2:
     # НОВЫЕ МЕТОДЫ ДЛЯ ВИРУСНОГО КОНТЕНТА
     
     async def _create_viral_hot_take(self) -> RichTextPost:
-        """Создает вирусное горячее мнение с высоким engagement потенциалом"""
-        hot_take_topics = [
-            "AI replacing developers is overhyped",
-            "Remote work is killing innovation", 
-            "Most startups fail because of ego, not market",
-            "College degrees are becoming irrelevant in tech",
-            "Open source is not sustainable long-term",
-            "Crypto is just gambling with extra steps",
-            "Social media algorithms are destroying creativity",
-            "The metaverse was a $100B mistake"
-        ]
-        
-        selected_topic = random.choice(hot_take_topics)
-        
-        async def content_creator():
-            viral_prompts = self.engagement_optimizer.generate_viral_post_prompts()
-            ai_prompt = f"""
-            Create a controversial but thoughtful hot take about: "{selected_topic}"
-            
-            Requirements:
-            - Be provocative but not offensive
-            - Include surprising statistics or facts
-            - Add personal experience or industry insight
-            - End with a question to encourage debate
-            - Use emotional language strategically
-            - 180-250 characters max
-            - Include 3-4 relevant hashtags
-            
-            Format as JSON: {{"post_text": "...", "hashtags": "..."}}
-            
-            Example style: "Unpopular opinion: {selected_topic}. After 10 years in the industry, I've seen this pattern destroy more companies than market crashes. Here's why... What's your take? 🔥"
-            """
-            return await self.generate_structured_post_content(ai_prompt, model_key='powerful')
+        """Viral hot take (delegates to ViralHotTakeStrategy / STRAT-010)."""
+        return await self.viral_hot_take_strategy.create()
 
-        async def fallback_creator():
-            return {
-                "post_text": f"🔥 Hot take: {selected_topic}. Change my mind! What's your experience?",
-                "hashtags": "#hottake #controversial #tech #opinion"
-            }
-
-        return await self._create_post_with_image_generation(
-            content_creator,
-            f"controversial opinion about {selected_topic}",
-            'viral_hot_take',
-            fallback_creator
-        )
-    
     async def _create_trending_commentary(self) -> RichTextPost:
-        """Создает комментарий к актуальным трендам с уникальным углом"""
-        trending_themes = [
-            "latest AI breakthrough", "tech layoffs", "startup funding news",
-            "new programming language", "security breach", "platform changes",
-            "industry controversy", "major acquisition", "economic changes",
-            "regulatory changes in tech"
-        ]
-        
-        selected_theme = random.choice(trending_themes)
-        
-        async def content_creator():
-            ai_prompt = f"""
-            Create ONE concise social post about "{selected_theme}".
-            Return ONLY JSON with keys "post_text" and "hashtags".
-            post_text: 180-230 chars, concrete angle, one clear implication, one question at the end.
-            hashtags: 2-4 English tags starting with #.
-            """
-            return await self.generate_structured_post_content(ai_prompt, model_key='powerful')
-
-        async def fallback_creator():
-            return {
-                "post_text": f"📰 Breaking: {selected_theme} is trending. Here's my take on what this really means for the industry... Thoughts?",
-                "hashtags": "#breaking #tech #analysis #trends"
-            }
-
-        return await self._create_post_with_image_generation(
-            content_creator,
-            f"trending news commentary about {selected_theme}",
-            'trending_commentary',
-            fallback_creator
-        )
+        """Trending commentary (delegates to TrendingCommentaryStrategy / STRAT-010)."""
+        return await self.trending_commentary_strategy.create()
     
     async def _create_personal_insight(self) -> RichTextPost:
         """Personal insight post (delegates to PersonalInsightStrategy / STRAT-008)."""
@@ -2589,104 +2610,13 @@ class AutonomousBlueskyBotV2:
         while True:
             try:
                 cycle_start = time.time()
-                # Обновляем heartbeat в начале каждого цикла
-                self._update_heartbeat()
-                self._consecutive_errors = 0  # Сброс circuit breaker при успешном старте цикла
-                logger.info(f"🔄 Цикл {cycle_count + 1} - {datetime.now()}")
-                
-                # Engagement mode gate (orchestration-layer)
-                engagement_mode = self.config.get('engagement_mode', 'open')
-                run_engagement = engagement_mode != 'mention_only'
-
-                if run_engagement:
-                    await self.smart_engagement()
-                    if cycle_count % 5 == 0:
-                        await self.follow_strategy()
-                else:
-                    logger.info("🔇 Engagement пропущен (mode=mention_only)")
-                
-                # Генерация контента с контролем времени + smart scheduler
-                time_since_last_post = datetime.now() - last_post_time
-                min_interval = timedelta(minutes=self.post_interval[0])
-
-                in_posting_window = self._is_posting_window()
-                
-                if time_since_last_post >= min_interval and in_posting_window:
-                    await self.create_scheduled_post()
-                    last_post_time = datetime.now()
-                elif not in_posting_window:
-                    logger.info("🌙 Quiet hours / вне active window — постинг отложен")
-                else:
-                    remaining = min_interval - time_since_last_post
-                    logger.info(f"⏳ До следующего поста осталось: {remaining}")
-                
-                # Обучение на основе взаимодействий и реальных метрик
-                if cycle_count % 10 == 0:
-                    # Сначала обновляем реальные метрики постов
-                    await self.update_posts_with_real_metrics()
-                    # Затем запускаем обучение с реальными данными
-                    self.learn_from_memory()
-                
-                # Сохранение памяти и очистка старых данных
-                if cycle_count % 20 == 0:
-                    self._trim_in_memory_caches()
-                    # НОВОЕ: Сохраняем множества защиты от дубликатов в память
-                    self.memory.commented_posts_cache = self.commented_posts
-                    self.memory.recent_comments_cache = self.recent_comments[-20:]  # Последние 20
-                    self.memory.liked_posts_cache = self.liked_posts
-                    self.memory.reposted_posts_cache = self.reposted_posts
-                    self.memory.followed_users_cache = self.followed_users
-                    
-                    self.memory.last_update = datetime.now()
-                    self.memory.save()
-                    logger.info("💾 Память сохранена (включая кэши защиты от дубликатов)")
-                    logger.info(f"📊 Статистика сессии: {self.session_stats}")
-                    logger.info(f"📊 Постов за день: {self.daily_post_count}/{self.max_posts_per_day}")
-                
-                # Периодическая очистка старых данных (раз в день)
-                if cycle_count % 144 == 0 and cycle_count > 0:
-                    self._cleanup_old_content_hashes()
-                    self._cleanup_old_commented_posts()
-                    self.action_ledger.compact()
-                    removed_files, removed_bytes = _cleanup_log_budget(log_dir, LOG_TOTAL_BUDGET_BYTES)
-                    if removed_files:
-                        logger.warning(
-                            f"🧹 Очистка логов по бюджету: удалено {removed_files} файлов, "
-                            f"освобождено {removed_bytes / (1024 * 1024):.1f} MB"
-                        )
-                
-                # RSS rotation + daily report
-                if cycle_count % 50 == 0 and cycle_count > 0:
-                    logger.info("🔧 RSS rotation...")
-                    self.rss_manager.rotate()
-                    self.rss_feeds = self.rss_manager.get_active_urls()
-                    logger.info(f"📡 Active RSS: {len(self.rss_feeds)}, probation: {len(self.rss_manager.get_probation_urls())}")
-
-                if cycle_count % 144 == 0 and cycle_count > 0:
-                    report = generate_daily_report(self.session_stats, self.memory, self.config)
-                    save_daily_report(report)
-                    self.memory.ab_results = self.ab_engine.results
-                    if self.dry_run and self.dry_run_log:
-                        self.dry_run_log.save()
-                
-                # Анализ разнообразия постов каждые 30 циклов (примерно раз в 5-6 часов)
-                if cycle_count % 30 == 0 and cycle_count > 0:
-                    logger.info("📊 Запуск анализа разнообразия постов...")
-                    await self.analyze_post_diversity()
-                
-                # Мониторинг здоровья бота каждые 20 циклов (примерно раз в 3-4 часа)
-                if cycle_count % 20 == 0 and cycle_count > 0:
-                    health_status = await self.health_monitor()
-                    if health_status['overall_health'] == 'critical':
-                        logger.warning("🚨 Критическое состояние здоровья! Запуск экстренного восстановления...")
-                        recovery_success = await self.emergency_recovery()
-                        if not recovery_success:
-                            logger.error("❌ Экстренное восстановление не удалось")
-                            break
-                
-                # Refresh persisted session periodically (every 10 cycles ~ every 10-15h)
-                if cycle_count % 10 == 0 and cycle_count > 0:
-                    self._persist_session()
+                # CYCLE-001: one-tick orchestration (auth/sleep stay here)
+                tick_result: TickResult = await self.bot_cycle_runner.tick(
+                    cycle_count, last_post_time
+                )
+                last_post_time = tick_result.last_post_time
+                if tick_result.stop:
+                    break
 
                 # Log activity budget status
                 budget_info = self.activity_budget.summary()
@@ -2938,30 +2868,10 @@ class AutonomousBlueskyBotV2:
             logger.error(f"Ошибка анализа производительности: {e}")
 
     def _update_strategy_weights_from_memory(self) -> None:
-        """Корректирует веса post_strategies по topic_outcomes (±10% от текущего, не выходя за [0.05,0.5])."""
-        try:
-            outcomes = self.memory.topic_outcomes
-            if not outcomes:
-                return
-            avg_all = sum(v['total_er'] / max(v['count'], 1) for v in outcomes.values()) / len(outcomes)
-            strategies_config = self.config.get('post_strategies', {})
-            changed = False
-            for fname, weight in list(strategies_config.items()):
-                topic_key = fname.lstrip('_create_').replace('quality_', '').replace('_post', '').replace('_', ' ').strip()
-                best_match = max(outcomes.keys(), key=lambda k: len(set(k.split()) & set(topic_key.split())), default=None)
-                if not best_match:
-                    continue
-                er_topic = outcomes[best_match]['total_er'] / max(outcomes[best_match]['count'], 1)
-                delta = 0.1 if er_topic > avg_all else -0.1
-                new_weight = round(max(0.05, min(0.50, weight * (1 + delta))), 3)
-                if new_weight != weight:
-                    strategies_config[fname] = new_weight
-                    changed = True
-            if changed:
-                self.config['post_strategies'] = strategies_config
-                logger.info(f"🔄 post_strategies обновлены по A/B данным: {strategies_config}")
-        except Exception as e:
-            logger.warning(f"⚠️ Ошибка обновления весов стратегий: {e}")
+        """Корректирует веса post_strategies по topic_outcomes (LEARN-001)."""
+        apply_strategy_weights_from_outcomes(
+            self.memory.topic_outcomes, self.config
+        )
     
     async def maintain_rate_limits(self) -> None:
         """Управление rate limits"""

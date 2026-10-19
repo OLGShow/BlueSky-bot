@@ -31,6 +31,7 @@ PYFILES=(
     ai_improvements.py
     bluesky_post_formatter.py
     bluesky_rich_posts.py
+    bot_cycle.py
     bot_learning_module.py
     bot_monitor.py
     content_ports.py
@@ -48,6 +49,7 @@ PYFILES=(
     resilience_service.py
     rss_source_manager.py
     state_service.py
+    strategy_learning.py
     url_safety.py
     verify_bot.py
 )

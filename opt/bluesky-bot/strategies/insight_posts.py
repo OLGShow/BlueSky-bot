@@ -11,8 +11,7 @@ Import rules:
 - Composition root builds ports and registers instances under stable
   ``STRATEGY_NAME`` keys in the hybrid registry.
 
-Out of scope (deferred follow-up): ``_create_viral_hot_take``,
-``_create_trending_commentary``.
+Viral/trending family lives in ``viral_posts`` (STRAT-010).
 """
 
 from __future__ import annotations

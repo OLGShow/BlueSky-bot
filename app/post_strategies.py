@@ -5,23 +5,23 @@ Maps config ``post_strategies`` names (e.g. ``_create_quality_news_post``)
 to callables / :class:`PostStrategy` implementations without requiring a full
 extraction from ``AutonomousBlueskyBotV2``.
 
-**Current (Phase 2 / STRAT-002):**
+**Current (Phase 2 / STRAT-003 hybrid):**
 - ``PostStrategy`` Protocol + ``CallablePostStrategy`` adapter
 - ``PostStrategyRegistry`` with ``register`` / ``get`` / ``list`` / ``resolve``
-- Composition root registers **all** ``post_strategies`` config keys as bound
-  methods via ``build_bound_registry`` / ``register_bound_methods``
+- Composition root: ``build_bound_registry`` for unextracted keys, then
+  overwrite extracted families (e.g. ``QualityNewsStrategy`` under
+  ``_create_quality_news_post``) so the registry prefers strategy instances
 - Runtime dispatch: ``create_scheduled_post`` uses
   ``registry.weighted_entries(config)``; duplicate-fallback uses
   ``registry.resolve(name)`` (getattr only for names not in config)
+- Learning / A/B keys stay the config **name strings** (stable)
 
-**How to use later (full strategy extraction):**
+**How to extract more families:**
 
-1. Extract each ``_create_*`` method into a module that implements
-   ``PostStrategy.create`` (or wrap with ``CallablePostStrategy``).
-2. At composition-root init, ``registry.register(name, strategy)`` for every
-   config key (or auto-register from a package).
-3. Keep weighted choice / quality-gate loops on resolved callables;
-   learning / A/B keys stay the config **name strings**.
+1. Move each ``_create_*`` into a module that implements ``PostStrategy.create``.
+2. At composition-root init, ``registry.register(name, strategy, overwrite=True)``
+   after the bound pass (or register only extracted + bound remainder).
+3. Keep weighted choice / quality-gate loops on resolved callables.
 4. Drop bound methods from the bot once all keys resolve via the registry.
 
 Import rules (ADR invariants):

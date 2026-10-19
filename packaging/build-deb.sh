@@ -53,6 +53,7 @@ PYFILES=(
     log_sanitizer.py
     openrouter_adapter.py
     pollinations_adapter.py
+    quality_pipeline.py
     resilience_service.py
     rss_source_manager.py
     state_service.py
@@ -63,6 +64,14 @@ PYFILES=(
 for f in "${PYFILES[@]}"; do
     [ -f "$APP_DIR/$f" ] && cp "$APP_DIR/$f" "$STAGE/opt/bluesky-bot/"
 done
+
+# strategies/ package (STRAT-002+) under /opt/bluesky-bot/strategies/
+if [ -d "$APP_DIR/strategies" ]; then
+    mkdir -p "$STAGE/opt/bluesky-bot/strategies"
+    for f in "$APP_DIR/strategies"/*.py; do
+        [ -f "$f" ] && cp "$f" "$STAGE/opt/bluesky-bot/strategies/"
+    done
+fi
 
 cp "$REPO_ROOT/requirements.txt" "$STAGE/opt/bluesky-bot/"
 cp "$REPO_ROOT/env.example"       "$STAGE/opt/bluesky-bot/"

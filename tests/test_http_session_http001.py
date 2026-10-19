@@ -236,6 +236,92 @@ class TestEnsureHttpSessionHttp001(unittest.TestCase):
         self.assertIs(result, fresh)
         old.close.assert_awaited()
 
+    def test_ensure_reinjects_shared_session_into_adapters(self):
+        bot_mod = _load_bot_module()
+        bot = _make_bot_shell(bot_mod)
+        ai = mock.MagicMock()
+        ai.set_http_session = mock.MagicMock()
+        bot.pollinations_ai = ai
+        bot.rss_manager = mock.MagicMock()
+        bot.rss_manager.http_session = None
+        fresh = mock.MagicMock()
+        fresh.closed = False
+
+        def _create():
+            bot.http_session = fresh
+
+        with mock.patch.object(bot, "_create_http_session", side_effect=_create):
+            result = asyncio.run(bot._ensure_http_session(force_recreate=True))
+        self.assertIs(result, fresh)
+        ai.set_http_session.assert_called_with(fresh)
+        self.assertIs(bot.rss_manager.http_session, fresh)
+
+
+class TestAdapterSharedSessionInjection(unittest.TestCase):
+    """Injected path: no ad-hoc ClientSession; closed shared → RuntimeError."""
+
+    def test_openrouter_uses_injected_session_without_creating(self):
+        from openrouter_adapter import OpenRouterAI
+
+        shared = mock.MagicMock()
+        shared.closed = False
+        with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-v1-testkey"}):
+            with mock.patch("openrouter_adapter.aiohttp.ClientSession") as ctor:
+                ai = OpenRouterAI(api_key="sk-or-v1-testkey", http_session=shared)
+                session = asyncio.run(ai.get_session())
+                self.assertIs(session, shared)
+                ctor.assert_not_called()
+                self.assertFalse(ai._owns_session)
+
+    def test_pollinations_uses_injected_session_without_creating(self):
+        from pollinations_adapter import PollinationsAI
+
+        shared = mock.MagicMock()
+        shared.closed = False
+        with mock.patch("pollinations_adapter.aiohttp.ClientSession") as ctor:
+            ai = PollinationsAI(http_session=shared)
+            session = asyncio.run(ai.get_session())
+            self.assertIs(session, shared)
+            ctor.assert_not_called()
+            self.assertFalse(ai._owns_session)
+
+    def test_injected_path_raises_after_shared_closed(self):
+        from pollinations_adapter import PollinationsAI
+
+        shared = mock.MagicMock()
+        shared.closed = False
+        ai = PollinationsAI(http_session=shared)
+        shared.closed = True
+        with self.assertRaises(RuntimeError) as ctx:
+            asyncio.run(ai.get_session())
+        self.assertIn("closed", str(ctx.exception).lower())
+
+    def test_close_session_does_not_close_shared(self):
+        from pollinations_adapter import PollinationsAI
+
+        shared = mock.MagicMock()
+        shared.closed = False
+        shared.close = mock.AsyncMock()
+        ai = PollinationsAI(http_session=shared)
+        asyncio.run(ai.close_session())
+        shared.close.assert_not_called()
+        self.assertIsNone(ai._session)
+
+    def test_setter_reinject_after_recreate(self):
+        from openrouter_adapter import OpenRouterAI
+
+        old = mock.MagicMock()
+        old.closed = True
+        fresh = mock.MagicMock()
+        fresh.closed = False
+        with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-v1-testkey"}):
+            ai = OpenRouterAI(api_key="sk-or-v1-testkey", http_session=old)
+            with self.assertRaises(RuntimeError):
+                asyncio.run(ai.get_session())
+            ai.set_http_session(fresh)
+            session = asyncio.run(ai.get_session())
+            self.assertIs(session, fresh)
+
 
 def run_http001_assertions() -> None:
     """Callable from verify/acceptance — raises AssertionError on failure."""

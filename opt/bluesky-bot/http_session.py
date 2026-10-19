@@ -9,11 +9,19 @@ recreate; close for shutdown.
 from __future__ import annotations
 
 import logging
-from typing import Callable, Optional
+from typing import Callable, Optional, Protocol, runtime_checkable
 
 import aiohttp
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class HttpSessionConsumer(Protocol):
+    """Narrow port: adapters that accept an injected shared ClientSession."""
+
+    def set_http_session(self, session: Optional[aiohttp.ClientSession]) -> None:
+        ...
 
 
 def create_http_session() -> aiohttp.ClientSession:

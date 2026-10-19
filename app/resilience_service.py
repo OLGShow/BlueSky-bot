@@ -14,6 +14,11 @@ from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
+# Finite defaults — never infinite retry (RETRY-001 / RETRY-002).
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_RETRY_BUDGET = 10
+# CLIENT (4xx non-429) never retries — see RetryPolicy.execute.
+
 
 class ErrorClass(Enum):
     RATE_LIMIT = 'rate_limit'     # 429
@@ -26,7 +31,8 @@ class ErrorClass(Enum):
 
 def classify_error(error: Exception) -> ErrorClass:
     msg = str(error).lower()
-    if '429' in msg or 'rate' in msg or 'ratelimit' in msg:
+    # Explicit phrases only — bare 'rate' false-positives on words like 'generate'.
+    if any(p in msg for p in ('429', 'rate limit', 'ratelimit', 'too many requests')):
         return ErrorClass.RATE_LIMIT
     if any(c in msg for c in ('401', '403', 'unauthorized', 'forbidden')):
         return ErrorClass.AUTH
@@ -120,12 +126,13 @@ class RetryPolicy:
         self.breaker = breaker
         self.max_retries = max_retries
         self.retry_budget = retry_budget
-        self._budget_used = 0
 
     async def execute(self, fn: Callable, *args, **kwargs):
         if self.breaker and not self.breaker.allow_request():
             raise RuntimeError(f"CircuitBreaker[{self.breaker.name}] is open — request blocked")
 
+        # Per-execute budget so shared RetryPolicy instances stay safe across calls.
+        budget_used = 0
         last_error = None
         for attempt in range(1, self.max_retries + 1):
             try:
@@ -141,8 +148,8 @@ class RetryPolicy:
                         self.breaker.record_failure()
                     raise
 
-                self._budget_used += 1
-                if self._budget_used > self.retry_budget:
+                budget_used += 1
+                if budget_used > self.retry_budget:
                     logger.warning(f"Retry budget exhausted ({self.retry_budget})")
                     if self.breaker:
                         self.breaker.record_failure()
@@ -161,5 +168,64 @@ class RetryPolicy:
 
         raise last_error  # type: ignore[misc]
 
-    def reset_budget(self) -> None:
-        self._budget_used = 0
+
+@dataclass(frozen=True)
+class OutboundRetryPolicies:
+    """Named RetryPolicy bundle for composition-root injection.
+
+    Built once at bot startup; adapters consume via ``policy.execute`` in
+    RETRY-002. Every policy has finite ``max_retries`` and ``retry_budget``.
+    """
+
+    atproto: RetryPolicy
+    ai: RetryPolicy
+    rss_http: RetryPolicy
+    media_upload: RetryPolicy
+
+
+def build_outbound_retry_policies(
+    *,
+    cb_bluesky: Optional[CircuitBreaker] = None,
+    cb_ai: Optional[CircuitBreaker] = None,
+    cb_rss: Optional[CircuitBreaker] = None,
+    max_retries_atproto: int = DEFAULT_MAX_RETRIES,
+    max_retries_ai: int = DEFAULT_MAX_RETRIES,
+    max_retries_rss: int = 2,
+    max_retries_media: int = DEFAULT_MAX_RETRIES,
+    retry_budget_atproto: int = DEFAULT_RETRY_BUDGET,
+    retry_budget_ai: int = DEFAULT_RETRY_BUDGET,
+    retry_budget_rss: int = 8,
+    retry_budget_media: int = 8,
+) -> OutboundRetryPolicies:
+    """Create per-adapter RetryPolicy instances (composition root helper).
+
+    Defaults keep retries bounded; ErrorClass.CLIENT short-circuits without
+    sleep. Breakers are optional so hermetic tests can omit them.
+    """
+    def _bounded(n: int, label: str) -> int:
+        if n < 1:
+            raise ValueError(f"{label} must be >= 1 (got {n}); infinite retry is forbidden")
+        return n
+
+    return OutboundRetryPolicies(
+        atproto=RetryPolicy(
+            breaker=cb_bluesky,
+            max_retries=_bounded(max_retries_atproto, 'max_retries_atproto'),
+            retry_budget=_bounded(retry_budget_atproto, 'retry_budget_atproto'),
+        ),
+        ai=RetryPolicy(
+            breaker=cb_ai,
+            max_retries=_bounded(max_retries_ai, 'max_retries_ai'),
+            retry_budget=_bounded(retry_budget_ai, 'retry_budget_ai'),
+        ),
+        rss_http=RetryPolicy(
+            breaker=cb_rss,
+            max_retries=_bounded(max_retries_rss, 'max_retries_rss'),
+            retry_budget=_bounded(retry_budget_rss, 'retry_budget_rss'),
+        ),
+        media_upload=RetryPolicy(
+            breaker=cb_bluesky,
+            max_retries=_bounded(max_retries_media, 'max_retries_media'),
+            retry_budget=_bounded(retry_budget_media, 'retry_budget_media'),
+        ),
+    )

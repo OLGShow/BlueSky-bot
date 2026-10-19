@@ -4,7 +4,7 @@
 **Parent orchestration:** orch-2026-10-19-14-33-layout-godobj  
 **Parent plan:** `ai_docs/develop/plans/2026-10-19-layout-and-god-object-prep.md`  
 **ADR:** `ai_docs/develop/architecture/2026-10-19-layering-and-ports.md`  
-**Status:** 🟡 In progress (Phase 2 done; Phase 3 dispatch done; extract + Phases 4–7 remain)  
+**Status:** 🟡 In progress (Phases 2–5 advanced; Phase 6 partial; remaining strategy families + Phase 7 deferred)  
 **Goal:** Complete DIP / OCP decomposition of `AutonomousBlueskyBotV2` beyond Phase 1  
   (Engagement ports + strategy registry skeleton).  
 **Priority:** High  
@@ -15,8 +15,11 @@
 |------|--------|--------------|
 | **Phase 2** — ContentService ports | ✅ Done | `orch-2026-10-19-15-06-godobj-p2` — report: [god-object-phase2-content-strategies-implementation.md](../reports/2026-10-19-god-object-phase2-content-strategies-implementation.md) |
 | **Phase 3** — registry register + dispatch | ✅ Done | Same orch — full keys via `build_bound_registry`; `create_scheduled_post` → `weighted_entries` / `resolve` |
-| **Phase 3** — strategy-family extract (`STRAT-003`) | ⏸️ Deferred | No `app/strategies/` extract yet; still remaining work |
-| **Phases 4–7** | ⬜ Remain | RetryPolicy, quality pipeline, shared HTTP session, further bot slices |
+| **Phase 3** — news-family extract (`STRAT-003`) | ✅ Done | `orch-2026-10-19-17-06-strat003-io` — `app/strategies/quality_news.py` + hybrid registry; **remaining strategy families still deferred** |
+| **Phase 4** — RetryPolicy | ✅ Wired (AI+RSS) | Same orch — OpenRouter/Pollinations + RSS GET via RetryPolicy; ATProto/media leftovers deferred |
+| **Phase 5** — quality pipeline | ✅ On scheduled post | Same orch — `QualityPipeline` / `regenerate_until_quality` on `create_scheduled_post` |
+| **Phase 6** — shared HTTP | 🟡 Partial | AI adapters done; **formatter / rich_posts leftover** |
+| **Phase 7** | ⬜ Remain | Further bot slices |
 
 ---
 
@@ -39,13 +42,13 @@ Bot remains composition root until slices are small enough to drop.
 | Phase | Name | Est. | Status |
 |-------|------|------|--------|
 | **2** | ContentService ports + wiring | 3–4h | ✅ Done (`orch-2026-10-19-15-06-godobj-p2`) |
-| **3** | Full post strategy extraction | 4–6h | 🟡 Dispatch done; **extract (`STRAT-003`) deferred** |
-| **4** | RetryPolicy on outbound I/O | 2–3h | ⬜ Remain |
-| **5** | Unified quality pipeline | 3–4h | ⬜ Remain |
-| **6** | Shared HTTP `ClientSession` injection | 2h | ⬜ Remain |
+| **3** | Full post strategy extraction | 4–6h | 🟡 News family ✅ (`orch-2026-10-19-17-06-strat003-io`); **other families deferred** |
+| **4** | RetryPolicy on outbound I/O | 2–3h | ✅ Wired AI+RSS (`orch-2026-10-19-17-06-strat003-io`); ATProto/media leftovers |
+| **5** | Unified quality pipeline | 3–4h | ✅ Scheduled-post path (`orch-2026-10-19-17-06-strat003-io`) |
+| **6** | Shared HTTP `ClientSession` injection | 2h | 🟡 Partial (AI adapters done; formatter/rich_posts left) |
 | **7** | Further bot slices (state / schedule / learning) | ongoing | ⬜ Remain |
 
-Suggested next orchestration: **Phase 3 extract (STRAT-003+)** and/or **Phase 4**, ≤10 tasks, same verify gate.
+Suggested next orchestration: **remaining strategy families** and/or **Phase 6 leftovers** (formatter/rich_posts) / ATProto retry, ≤10 tasks, same verify gate.
 
 ---
 
@@ -70,7 +73,7 @@ Suggested next orchestration: **Phase 3 extract (STRAT-003+)** and/or **Phase 4*
 
 ## Phase 3 — Full strategy extraction
 
-**Status:** 🟡 Partial — register + dispatch ✅; family extract ⏸️ deferred
+**Status:** 🟡 Partial — register + dispatch ✅; **news-family extract ✅**; remaining families deferred
 
 **Problem:** `create_scheduled_post` built strategies via `hasattr` / `getattr`; registry was proof-only.
 
@@ -79,15 +82,21 @@ Suggested next orchestration: **Phase 3 extract (STRAT-003+)** and/or **Phase 4*
 2. Switch `create_scheduled_post` (and duplicate fallback) to `weighted_entries` / `resolve`
 3. Unit tests + verify gate (smoke 2/2; unittest 153 OK, 3 skipped)
 
+**Done (news extract — `orch-2026-10-19-17-06-strat003-io`):**
+- `app/strategies/` package + `QualityNewsStrategy` (`quality_news.py`)
+- Hybrid registry overwrites `_create_quality_news_post` with extracted strategy; learning key stable
+- Packaging sync for `strategies/`
+
 **Still remaining:**
-3. Move private `_create_*` / media / link-preview helpers into `app/strategies/` modules implementing `PostStrategy` (incremental: one family per PR) — **STRAT-003 deferred**
+3. Move remaining private `_create_*` / media / link-preview helpers into `app/strategies/` modules implementing `PostStrategy` (incremental: one family per PR) — **other families deferred**
 4. Keep learning / A/B weight updates keyed by **strategy name strings** (stable config keys) — already preserved at dispatch
 5. Expand unit tests further as families extract
 
-**Acceptance (dispatch met; extract open):**
+**Acceptance (dispatch + news extract met; other families open):**
 - ✅ Runtime dispatch via registry (weights, quality gate regen, duplicates equivalent)
 - ✅ `post_strategies.py` remains free of bot imports
-- ⬜ New post kinds = register extracted strategy instances (bound methods still interim)
+- ✅ News family = extracted `PostStrategy` instance via hybrid registry
+- ⬜ Remaining post kinds = register extracted strategy instances (bound methods still interim)
 
 **How to use the registry (current + target extract):**
 
@@ -108,53 +117,63 @@ post = await strategy_fn()
 
 ## Phase 4 — RetryPolicy wiring
 
-**Status:** ⬜ Remain
+**Status:** ✅ Wired for AI + RSS (`orch-2026-10-19-17-06-strat003-io`); ATProto / media upload leftovers remain
 
 **Problem:** `RetryPolicy` / `classify_error` / `backoff_seconds` exist in `resilience_service` but are not consistently applied to all outbound I/O.
 
-**Actions:**
-1. Catalog outbound call sites (ATProto client, OpenRouter/Pollinations, RSS/HTTP, Bluesky uploads)
-2. Inject a shared `RetryPolicy` (or per-adapter policies) at composition root
-3. Wrap adapters — not the main loop — so services stay free of retry details
-4. Tests: fake failing adapter + policy exhaust / success-after-retry
+**Done:**
+1. Catalog outbound call sites (ATProto, OpenRouter/Pollinations, RSS/HTTP, media) — in STRAT-003 plan
+2. Inject `OutboundRetryPolicies` via `build_outbound_retry_policies` at composition root
+3. OpenRouter / Pollinations use `retry_policy.execute`; RSS GET via `_http_get_text_with_retry`
+4. Hermetic tests: `tests/test_retry_policy_retry002.py`
 
-**Acceptance:**
-- Documented policy per adapter class
-- Main loop does not reimplement ad-hoc retry for those paths
-- No silent infinite retries
+**Still remaining:**
+- ATProto / engagement write paths
+- Media upload / formatter HTTP leftovers
+
+**Acceptance (AI+RSS met):**
+- ✅ Documented policy per wired adapter class
+- ✅ Main loop does not reimplement ad-hoc retry for AI/RSS paths
+- ✅ No silent infinite retries (`max_retries` / `retry_budget` ≥ 1; CLIENT never retries)
 
 ---
 
 ## Phase 5 — Quality pipeline merge
 
-**Status:** ⬜ Remain
+**Status:** ✅ On scheduled-post path (`orch-2026-10-19-17-06-strat003-io`)
 
 **Problem:** Dual quality paths — `QualityGate` (growth_engine) vs `ContentQualityAnalyzer` (ai_improvements) — overlap and confuse regen logic.
 
-**Actions:**
-1. Document current responsibilities and call order (audit snippet)
-2. Design single pipeline interface (e.g. `check(text, context) -> (ok, reason)`)
-3. Migrate `create_scheduled_post` regen loop to one gate; keep analyzer as adapter or merge heuristics
-4. Config keys: one namespace for thresholds / max_regen
+**Done:**
+1. Unified interface in `app/quality_pipeline.py` (`QualityPipeline.evaluate` / `regenerate_until_quality`)
+2. `create_scheduled_post` migrates regen to single entry; staged gate vs score
+3. Tests: `tests/test_quality_pipeline_qual002.py`
 
-**Acceptance:**
-- One public quality entry point used by scheduled post path
-- No divergent “passed gate A / failed gate B” surprises without explicit staging
-- Tests for duplicate / low-signal / regen exhaustion
+**Acceptance (met for scheduled post):**
+- ✅ One public quality entry point used by scheduled post path
+- ✅ No divergent “passed gate A / failed gate B” surprises without explicit staging
+- ✅ Tests for duplicate / low-signal / regen exhaustion
 
 ---
 
 ## Phase 6 — Shared HTTP session injection
 
-**Status:** ⬜ Remain
+**Status:** 🟡 Partial (HTTP-001 start done in `orch-2026-10-19-17-06-strat003-io`)
 
 **Problem:** `http_session` helpers exist, but not all adapters/services receive the shared `aiohttp.ClientSession` via ports; risk of extra sessions or lifecycle bugs.
 
-**Actions:**
-1. Inventory who creates/uses ClientSession
-2. Add a narrow `HttpSessionPort` (or pass session into RSS / AI / URL fetch adapters)
-3. Ensure single create / recreate / close ownership on the bot (or a small `HttpSessionOwner` adapter)
-4. Tests: recreate-after-close; no session use after close
+**Done (HTTP-001):**
+- `HttpSessionConsumer` port in `http_session.py`
+- OpenRouter + Pollinations: constructor/`set_http_session` injection; no ad-hoc session in hot path when shared is live
+- Bot owns lifecycle (`create` / `ensure` / `close`) and re-injects on ensure/recreate
+
+**Deferred leftovers:**
+- [ ] Ad-hoc `aiohttp.ClientSession()` in `bluesky_rich_posts.py` (link metadata / gallery)
+- [ ] Ad-hoc `aiohttp.ClientSession()` in `bluesky_post_formatter.py` (image fetch)
+
+**Actions (remaining):**
+1. Inject shared session into formatter / rich_posts (or route through bot `http_session`)
+2. Tests: recreate-after-close for those paths; packaging / smoke still green
 
 **Acceptance:**
 - One owner for session lifecycle

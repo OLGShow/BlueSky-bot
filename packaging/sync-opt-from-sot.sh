@@ -44,6 +44,7 @@ PYFILES=(
     log_sanitizer.py
     openrouter_adapter.py
     pollinations_adapter.py
+    quality_pipeline.py
     resilience_service.py
     rss_source_manager.py
     state_service.py
@@ -66,6 +67,23 @@ for f in "${PYFILES[@]}"; do
     echo "synced: $f"
     synced=$((synced + 1))
 done
+
+# strategies/ package (STRAT-002+) — keep import path ``strategies.*`` under deploy root
+STRATEGIES_SRC="$APP_DIR/strategies"
+STRATEGIES_DST="$OPT_DIR/strategies"
+if [[ ! -d "$STRATEGIES_SRC" ]]; then
+    echo "WARN: missing SoT package: app/strategies/" >&2
+    missing=$((missing + 1))
+else
+    mkdir -p "$STRATEGIES_DST"
+    for f in "$STRATEGIES_SRC"/*.py; do
+        [[ -f "$f" ]] || continue
+        base="$(basename "$f")"
+        cp "$f" "$STRATEGIES_DST/$base"
+        echo "synced: strategies/$base"
+        synced=$((synced + 1))
+    done
+fi
 
 # Root SoT for env template (not under app/)
 ENV_SRC="$REPO_ROOT/env.example"

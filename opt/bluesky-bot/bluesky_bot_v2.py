@@ -48,7 +48,13 @@ from state_service import (
     SingleInstanceLock, SessionStore, ActivityBudget,
 )
 from resilience_service import (
-    CircuitBreaker, RetryPolicy, ErrorClass, classify_error, backoff_seconds,
+    CircuitBreaker,
+    RetryPolicy,
+    ErrorClass,
+    classify_error,
+    backoff_seconds,
+    OutboundRetryPolicies,
+    build_outbound_retry_policies,
 )
 from log_sanitizer import SanitizingFilter
 from engagement_ports import (
@@ -81,7 +87,26 @@ from http_session import (
     ensure_http_session,
     close_http_session,
 )
+from quality_pipeline import (
+    QualityContext,
+    QualityPipeline,
+    QualityResult,
+    STAGE_GATE,
+    STAGE_SCORE,
+    regenerate_until_quality,
+)
 from url_safety import UnsafeURLError, validate_outbound_url
+from strategies.ports import (
+    CallableDuplicateContent,
+    CallableFallbackPost,
+    CallableLinkPreview,
+    CallablePostFactory,
+    CallableRssHeadlines,
+    CallableStructuredContent,
+    LiveRssFeeds,
+    NewsStrategyPorts,
+)
+from strategies.quality_news import STRATEGY_NAME, QualityNewsStrategy
 
 # Настройка логирования с абсолютным путем
 import sys
@@ -259,6 +284,21 @@ class AutonomousBlueskyBotV2:
         # Единая HTTP сессия для всех операций с таймаутами
         self.http_session = None
         self._create_http_session()
+
+        # Per-subsystem circuit breakers + outbound RetryPolicy bundle (RETRY-001/002).
+        # Built before AI adapters so policies pass from composition root.
+        self._cb_bluesky = CircuitBreaker('bluesky_api', failure_threshold=5, recovery_timeout=300)
+        self._cb_ai = CircuitBreaker('ai_generation', failure_threshold=3, recovery_timeout=180)
+        self._cb_rss = CircuitBreaker('rss_fetch', failure_threshold=4, recovery_timeout=120)
+        self.retry_policies: OutboundRetryPolicies = build_outbound_retry_policies(
+            cb_bluesky=self._cb_bluesky,
+            cb_ai=self._cb_ai,
+            cb_rss=self._cb_rss,
+        )
+        self.retry_atproto = self.retry_policies.atproto
+        self.retry_ai = self.retry_policies.ai
+        self.retry_rss_http = self.retry_policies.rss_http
+        self.retry_media_upload = self.retry_policies.media_upload
         
         # AI clients — OpenRouter (gpt-4o-mini) preferred; Pollinations legacy fallback
         bot_language = (os.getenv('BOT_LANGUAGE') or 'en').split('#', 1)[0].strip().lower()
@@ -272,6 +312,8 @@ class AutonomousBlueskyBotV2:
                 default_model='creative',
                 language=bot_language,
                 model_id=os.getenv('OPENROUTER_MODEL') or 'openai/gpt-4o-mini',
+                http_session=self.http_session,
+                retry_policy=self.retry_ai,
             )
             logger.info(
                 "OpenRouter AI primary (%s), text=%s, image=%s",
@@ -280,8 +322,15 @@ class AutonomousBlueskyBotV2:
                 getattr(self.pollinations_ai, 'image_model_id', 'openai/gpt-image-1-mini'),
             )
         else:
-            self.pollinations_ai = PollinationsAI(default_model='creative', language=bot_language)
+            self.pollinations_ai = PollinationsAI(
+                default_model='creative',
+                language=bot_language,
+                http_session=self.http_session,
+                retry_policy=self.retry_ai,
+            )
             logger.warning("OPENROUTER_API_KEY not set — using legacy Pollinations.AI")
+
+        self._inject_http_session_into_adapters()
 
         self.ai_client = None  # Direct OpenAI as optional backup
 
@@ -449,11 +498,6 @@ class AutonomousBlueskyBotV2:
             action_costs=budget_cfg.get('action_costs'),
         )
 
-        # Per-subsystem circuit breakers
-        self._cb_bluesky = CircuitBreaker('bluesky_api', failure_threshold=5, recovery_timeout=300)
-        self._cb_ai = CircuitBreaker('ai_generation', failure_threshold=3, recovery_timeout=180)
-        self._cb_rss = CircuitBreaker('rss_fetch', failure_threshold=4, recovery_timeout=120)
-
         # Growth Engine
         self.dry_run = os.getenv('DRY_RUN', 'false').lower() in ('true', '1', 'yes')
         self.dry_run_log = DryRunAction() if self.dry_run else None
@@ -469,6 +513,14 @@ class AutonomousBlueskyBotV2:
         # Async task registry
         self._background_tasks: set = set()
         self.quality_gate = QualityGate(self.config)
+        # Unified quality entry (QUAL-002): same gate + analyzer instances
+        self.quality_pipeline = QualityPipeline(
+            self.config,
+            gate=self.quality_gate,
+            analyzer=self.content_analyzer,
+            min_combined_score=self.min_post_quality_score,
+            require_hashtags=self.require_hashtags,
+        )
         self.ab_engine = ABEngine(self.memory.ab_results)
         rel_groups = self.config.get('relevance_settings', {}).get('topic_groups', {})
         self.trend_radar = TrendRadar(rel_groups)
@@ -478,7 +530,11 @@ class AutonomousBlueskyBotV2:
         # Content + engagement ports after AB flags / ledger / dry-run exist
         self.content_service = ContentService(self._build_content_ports())
         self.engagement_service = EngagementService(self._build_engagement_ports())
-        # Strategy registry: all post_strategies config keys; dispatch via registry.
+        # News/RSS strategy (STRAT-002); registry prefers instance (STRAT-003)
+        self.quality_news_strategy = QualityNewsStrategy(
+            self._build_news_strategy_ports()
+        )
+        # Hybrid registry: extracted strategies + bound methods for the rest.
         self.post_strategy_registry = self._build_post_strategy_registry()
         if self.dry_run:
             logger.info("🧪 DRY-RUN режим: никакие действия не будут выполнены")
@@ -486,6 +542,18 @@ class AutonomousBlueskyBotV2:
         # Система мониторинга активности (heartbeat)
         self.last_heartbeat = datetime.now()
         self.heartbeat_file = 'bot_heartbeat.txt'
+
+    def _build_news_strategy_ports(self) -> NewsStrategyPorts:
+        """Composition-root wiring: bot attrs → NewsStrategyPorts (no strategy→bot)."""
+        return NewsStrategyPorts(
+            headlines=CallableRssHeadlines(self.fetch_external_content),
+            feeds=LiveRssFeeds(lambda: list(getattr(self, "rss_feeds", []) or [])),
+            duplicates=CallableDuplicateContent(self._is_duplicate_content),
+            content=CallableStructuredContent(self.generate_structured_post_content),
+            posts=CallablePostFactory(self.formatter.create_post),
+            link_preview=CallableLinkPreview(self.create_post_with_link_preview),
+            fallback=CallableFallbackPost(self._create_personal_opinion_post),
+        )
 
     def _build_content_ports(self) -> ContentPorts:
         """Composition-root wiring: bot attrs → ContentPorts (no service→bot)."""
@@ -503,14 +571,25 @@ class AutonomousBlueskyBotV2:
         )
 
     def _build_post_strategy_registry(self) -> PostStrategyRegistry:
-        """Composition-root: register all ``post_strategies`` config keys.
+        """Composition-root: hybrid registry for ``post_strategies`` config keys.
 
-        Interim: bound methods via ``getattr`` (ADR-allowed). Runtime dispatch
-        uses ``registry.weighted_entries`` / ``resolve`` in
-        ``create_scheduled_post`` and duplicate-fallback loops.
+        Unextracted families stay as bound methods. News/RSS is overwritten with
+        :attr:`quality_news_strategy` under stable key ``STRATEGY_NAME`` so
+        learning / A/B weight names remain unchanged. Runtime dispatch uses
+        ``registry.weighted_entries`` / ``resolve`` in ``create_scheduled_post``.
         """
         names = list(self.config.get("post_strategies", {}).keys())
         registry, registered, missing = build_bound_registry(self, names)
+
+        # STRAT-003: prefer extracted QualityNewsStrategy over thin bound method.
+        if STRATEGY_NAME in names:
+            registry.register(
+                STRATEGY_NAME, self.quality_news_strategy, overwrite=True
+            )
+            if STRATEGY_NAME not in registered:
+                registered = list(registered) + [STRATEGY_NAME]
+                missing = [n for n in missing if n != STRATEGY_NAME]
+
         if missing:
             logger.warning(
                 "PostStrategyRegistry: missing bound methods for config keys: %s",
@@ -600,7 +679,39 @@ class AutonomousBlueskyBotV2:
             force_recreate=force_recreate,
             create=_create,
         )
+        self._inject_http_session_into_adapters()
         return self.http_session
+
+    def _inject_http_session_into_adapters(self) -> None:
+        """Push live shared ClientSession into AI / RSS consumers (bot owns lifecycle)."""
+        ai = getattr(self, 'pollinations_ai', None)
+        if ai is not None and hasattr(ai, 'set_http_session'):
+            ai.set_http_session(self.http_session)
+        rss = getattr(self, 'rss_manager', None)
+        if rss is not None:
+            rss.http_session = self.http_session
+
+    async def _http_get_text_with_retry(self, url: str, timeout: float = 15) -> tuple[int, str]:
+        """Shared-session HTTP GET with ``retry_rss_http`` (RETRY-002 RSS path).
+
+        Raises after policy exhaust on 429 / 5xx / network. Non-retryable 4xx
+        returns ``(status, body)`` without retrying.
+        """
+        async def _once() -> tuple[int, str]:
+            await self._ensure_http_session()
+            assert self.http_session is not None
+            try:
+                async with self.http_session.get(url, timeout=timeout) as response:
+                    body = await response.text()
+                    if response.status == 429:
+                        raise RuntimeError(f"HTTP 429 rate limit fetching {url}")
+                    if response.status >= 500:
+                        raise RuntimeError(f"HTTP {response.status} fetching {url}")
+                    return response.status, body
+            except asyncio.TimeoutError as e:
+                raise TimeoutError(f"HTTP GET timed out for {url}") from e
+
+        return await self.retry_rss_http.execute(_once)
 
     def _is_posting_window(self) -> bool:
         """Check scheduling config (quiet_hours / active_windows).
@@ -1139,31 +1250,33 @@ class AutonomousBlueskyBotV2:
             strategy = self._weighted_choice(strategies)
             post = await strategy()
 
-            # Quality Gate с авто-регенерацией (усиленный промпт при рестарте)
-            regen_count = 0
-            max_regen = self.quality_gate.max_regen
+            # Unified quality pipeline (QUAL-002): gate regen + score, staged reasons
             recent_texts = [p.get('text', '') for p in self.memory.successful_posts[-20:]]
-            while post and hasattr(post, 'text') and post.text:
-                gate_ok, gate_reason = self.quality_gate.check(post.text, recent_texts)
-                if gate_ok:
-                    logger.info(
-                        f"✅ Предпроверка контента пройдена (сигнал/шум, без дубликатов) — попытка {regen_count + 1}"
-                    )
-                    break
-                regen_count += 1
-                logger.warning(
-                    f"⚠️ Предпроверка контента не пройдена: {gate_reason} (попытка {regen_count}/{max_regen})"
+
+            async def _regen_weighted_strategy():
+                chosen = self._weighted_choice(strategies)
+                return await chosen()
+
+            post, quality_result = await regenerate_until_quality(
+                post,
+                regenerate=_regen_weighted_strategy,
+                pipeline=self.quality_pipeline,
+                recent_posts=recent_texts,
+                set_regen_mode=lambda on: setattr(
+                    self, '_quality_gate_regen_mode', bool(on)
+                ),
+            )
+            if post and (
+                quality_result.ok or quality_result.stage == STAGE_SCORE
+            ):
+                self._apply_quality_result_to_post(post, quality_result)
+            if post and quality_result.ok:
+                logger.info(
+                    "✅ Quality pipeline passed (gate+score, stage=%s)",
+                    quality_result.stage,
                 )
-                if regen_count > max_regen:
-                    post = None
-                    break
-                # Передаём флаг "нужен усиленный промпт" через self
-                self._quality_gate_regen_mode = True
-                strategy = self._weighted_choice(strategies)
-                post = await strategy()
-                self._quality_gate_regen_mode = False
-            
-            if post and self._evaluate_post_quality(post):
+
+            if post and quality_result.ok:
                 # Проверяем на дубликаты еще раз перед публикацией
                 url = getattr(post, 'url', None) if hasattr(post, 'url') else None
                 image_url = getattr(post, 'image_url', None) if hasattr(post, 'image_url') else None
@@ -1248,10 +1361,26 @@ class AutonomousBlueskyBotV2:
                 self.content_service.schedule_post_performance_checks(created.uri)
                 
             else:
-                logger.warning(
-                    "⚠️ Пост не прошёл финальную оценку вирусности/порогов (viral/combined/triggers). "
-                    "Публикация отменена."
-                )
+                stage = getattr(quality_result, 'stage', None)
+                reason = getattr(quality_result, 'reason', 'unknown')
+                if stage == STAGE_GATE:
+                    logger.warning(
+                        "⚠️ Quality gate exhausted / failed (%s). Публикация отменена.",
+                        reason,
+                    )
+                elif stage == STAGE_SCORE:
+                    logger.warning(
+                        "⚠️ Пост не прошёл финальную оценку вирусности/порогов "
+                        "(%s). Публикация отменена.",
+                        reason,
+                    )
+                else:
+                    logger.warning(
+                        "⚠️ Пост не прошёл quality pipeline (%s/%s). "
+                        "Публикация отменена.",
+                        stage,
+                        reason,
+                    )
                 
         except Exception as e:
             logger.error(f"❌ Ошибка создания поста: {e}")
@@ -1306,203 +1435,93 @@ class AutonomousBlueskyBotV2:
             post.facets = []
         return post
 
+    def _apply_quality_result_to_post(
+        self, post: RichTextPost, result: QualityResult
+    ) -> None:
+        """Attach pipeline score fields onto the post object for memory / logging."""
+        if not post:
+            return
+        post.quality_score = result.combined_score
+        post.viral_score = result.viral_score
+        post.viral_factors = list(result.factors or [])
+
     def _evaluate_post_quality(self, post: RichTextPost) -> bool:
-        """УЛУЧШЕННАЯ оценка качества поста с анализом вирусного потенциала"""
+        """Score-stage quality via QualityPipeline (gate skipped — fallback parity)."""
         if not post or not post.text:
             return False
-        
-        # НОВОЕ: Используем улучшенный анализатор качества
-        analysis = self.content_analyzer.analyze_post_potential(post.text)
-        viral_score = analysis['viral_score']
-        factors = analysis['factors']
-        recommendations = analysis['recommendations']
-        
-        # Получаем настройки вирусного контента из конфигурации
-        viral_settings = self.config.get('viral_content_settings', {})
-        min_viral_score = viral_settings.get('min_viral_score', 0.4)
-        required_triggers = viral_settings.get('required_engagement_triggers', 2)
-        
-        # Базовая оценка (старая система)
-        basic_score = 0.0
-        text_length = len(post.text)
-        
-        # Длина поста (оптимальная 150-280 символов для вирусности)
-        if 150 <= text_length <= 280:
-            basic_score += 0.3
-        elif 80 <= text_length <= 150:
-            basic_score += 0.2
-        else:
-            basic_score += 0.1
-        
-        # Наличие эмодзи
-        emoji_count = len(re.findall(r'[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF\U0001F1E0-\U0001F1FF\U00002700-\U000027BF]', post.text))
-        if emoji_count > 0:
-            basic_score += 0.2
-        
-        # Наличие хештегов
-        hashtag_count = post.text.count('#')
-        if hashtag_count > 0:
-            basic_score += 0.2
-        elif self.require_hashtags:
+
+        result = self.quality_pipeline.evaluate(
+            post.text,
+            QualityContext(run_gate=False),
+        )
+        self._apply_quality_result_to_post(post, result)
+
+        details = result.details or {}
+        min_viral = details.get(
+            'min_viral_score', self.quality_pipeline.default_min_viral_score
+        )
+        min_combined = details.get(
+            'min_combined_score', self.min_post_quality_score
+        )
+        required_triggers = details.get(
+            'required_engagement_triggers',
+            self.quality_pipeline.default_required_triggers,
+        )
+
+        logger.info("📊 Финальная оценка перед публикацией (вирусность + пороги):")
+        logger.info(f"   🎯 Вирусный потенциал: {result.viral_score:.2f}/1.0")
+        logger.info(f"   📈 Базовая оценка: {result.basic_score:.2f}/1.0")
+        logger.info(f"   🔥 Итоговая оценка: {result.combined_score:.2f}/1.0")
+        logger.info(
+            f"   ✅ Факторы вирусности: "
+            f"{', '.join(result.factors) if result.factors else 'Нет'}"
+        )
+        if result.recommendations:
+            logger.info("   💡 Рекомендации:")
+            for rec in result.recommendations[:3]:
+                logger.info(f"     • {rec}")
+
+        meets_viral = details.get(
+            'meets_viral_threshold', result.viral_score >= min_viral
+        )
+        meets_combined = details.get(
+            'meets_basic_threshold', result.combined_score >= min_combined
+        )
+        meets_triggers = details.get(
+            'has_enough_triggers', len(result.factors) >= required_triggers
+        )
+        logger.info("   🎪 Проверки:")
+        logger.info(
+            f"     Вирусный порог ({min_viral}): {'✅' if meets_viral else '❌'}"
+        )
+        logger.info(
+            f"     Базовый порог ({min_combined}): {'✅' if meets_combined else '❌'}"
+        )
+        logger.info(
+            f"     Триггеры engagement ({required_triggers}): "
+            f"{'✅' if meets_triggers else '❌'}"
+        )
+
+        if result.reason == 'missing_hashtags':
             logger.warning("⚠️ Пост не содержит обязательных хештегов")
             return False
-        
-        # Вопросы (критично для engagement)
-        if '?' in post.text:
-            basic_score += 0.3  # Увеличен вес для вопросов
-        
-        # Объединенная оценка: 60% вирусный потенциал + 40% базовая оценка
-        combined_score = (viral_score * 0.6) + (basic_score * 0.4)
-        
-        post.quality_score = combined_score
-        post.viral_score = viral_score
-        post.viral_factors = factors
-        
-        # Детальное логирование (этап 2: пороги viral/combined/triggers; не путать с предпроверкой контента)
-        logger.info(f"📊 Финальная оценка перед публикацией (вирусность + пороги):")
-        logger.info(f"   🎯 Вирусный потенциал: {viral_score:.2f}/1.0")
-        logger.info(f"   📈 Базовая оценка: {basic_score:.2f}/1.0")
-        logger.info(f"   🔥 Итоговая оценка: {combined_score:.2f}/1.0")
-        logger.info(f"   ✅ Факторы вирусности: {', '.join(factors) if factors else 'Нет'}")
-        
-        if recommendations:
-            logger.info(f"   💡 Рекомендации:")
-            for rec in recommendations[:3]:  # Показываем только первые 3
-                logger.info(f"     • {rec}")
-        
-        # Проверяем соответствие требованиям
-        meets_viral_threshold = viral_score >= min_viral_score
-        meets_basic_threshold = combined_score >= self.min_post_quality_score
-        has_enough_triggers = len(factors) >= required_triggers
-        
-        logger.info(f"   🎪 Проверки:")
-        logger.info(f"     Вирусный порог ({min_viral_score}): {'✅' if meets_viral_threshold else '❌'}")
-        logger.info(f"     Базовый порог ({self.min_post_quality_score}): {'✅' if meets_basic_threshold else '❌'}")
-        logger.info(f"     Триггеры engagement ({required_triggers}): {'✅' if has_enough_triggers else '❌'}")
-        
-        # Пост проходит если соответствует всем критериям
-        passed = meets_viral_threshold and meets_basic_threshold and has_enough_triggers
-        
-        if not passed:
+
+        if not result.ok:
             logger.warning(
-                f"⚠️ Финальная оценка: пороги не выполнены (viral: {viral_score:.2f}, "
-                f"combined: {combined_score:.2f}, triggers: {len(factors)})"
+                f"⚠️ Финальная оценка: пороги не выполнены (viral: {result.viral_score:.2f}, "
+                f"combined: {result.combined_score:.2f}, triggers: {len(result.factors)}, "
+                f"reason={result.reason})"
             )
-        
-        return passed
+        return result.ok
     
     async def _create_quality_news_post(self) -> Optional[RichTextPost]:
-        """Создает качественный новостной пост с изображением"""
-        try:
-            # ПРИНУДИТЕЛЬНО получаем свежие новости из RSS
-            logger.info("🌐 Активация RSS-фидов для новостного поста...")
-            news_content = await self.fetch_external_content()
-            
-            if not news_content:
-                logger.warning("⚠️ RSS-фиды не вернули новости, проверяем источники...")
-                # Логируем состояние RSS источников
-                logger.info(f"📋 Доступно RSS источников: {len(self.rss_feeds)}")
-                for i, feed_url in enumerate(self.rss_feeds[:5]):
-                    source_name = feed_url.split('//')[-1].split('/')[0]
-                    logger.info(f"   {i+1}. {source_name}")
-                return await self._create_personal_opinion_post()
-            
-            # Выбираем самую интересную новость, которая еще не была опубликована
-            selected_news = None
-            for news in news_content[:10]:  # Проверяем топ-10 для большего выбора
-                if len(news.get('title', '')) > 20 and news.get('description'):
-                    # Проверяем на дубликаты
-                    url = news.get('url', '')
-                    image_url = news.get('image_url', '')
-                    
-                    if not self._is_duplicate_content("", url, image_url):
-                        selected_news = news
-                        logger.info(f"✅ Выбрана уникальная новость: {news['title'][:50]}...")
-                        break
-                    else:
-                        logger.info(f"🔄 Пропускаем дубликат новости: {news['title'][:50]}...")
-            
-            if not selected_news:
-                logger.warning("⚠️ Все новости уже были опубликованы или не подходят")
-                logger.info("🔄 Переключаемся на альтернативный контент вместо новостей")
-                return await self._create_personal_opinion_post()
-            
-            # Создаем персональный комментарий к новости
-            personal_takes = [
-                "Interesting turn! 🤔",
-                "Didn't expect this development",
-                "This changes a lot in the industry",
-                "Wow, what news! 🔥",
-                "Curious times...",
-                "Worth taking a closer look",
-                "Classic! Just as I thought 😏"
-            ]
-            
-            personal_comment = random.choice(personal_takes)
-            
-            # Генерируем человечный пост с динамическими хештегами
-            prompt = f"""
-            Create a personal social media post about this news: "{selected_news['title']}"
-            Start with the personal comment: "{personal_comment}"
-            
-            Provide the output in JSON format with "post_text" (in English, 150-200 chars, retell the news briefly in your own words, add a natural ending - it can be a question, observation, emoji, or statement) and "hashtags" (in English, 2-3 relevant tags).
+        """Создает качественный новостной пост (делегирует в QualityNewsStrategy).
 
-            Examples:
-            {{
-              "post_text": "Interesting turn! 🤔 OpenAI just released a new model with revolutionary capabilities. This could change everything.",
-              "hashtags": "#news #AI #technology"
-            }}
-            {{
-              "post_text": "Classic! 🙄 Another tech CEO promises to revolutionize everything. We'll see...",
-              "hashtags": "#tech #startup #news"
-            }}
-            {{
-              "post_text": "Wow! New research shows AI can predict weather patterns 10x better than before 🌩️",
-              "hashtags": "#science #AI #weather"
-            }}
-            """
-            
-            structured_content = await self.generate_structured_post_content(prompt, model_key='creative')
-            
-            # Обрабатываем структурированный ответ
-            if structured_content:
-                post_text = structured_content.get('post_text', '')
-                hashtags = structured_content.get('hashtags', '#новости #технологии')
-                
-                # Объединяем текст и хештеги
-                final_content = f"{post_text}\n\n{hashtags}"
-                
-                post = self.formatter.create_post(final_content, content_type='news')
-                
-                # Создаем пост с карточкой ссылки и изображением
-                if selected_news.get('image_url'):
-                    try:
-                        # Используем новый метод для создания поста с изображением
-                        enhanced_post = await self.create_post_with_link_preview(
-                            final_content,
-                            selected_news.get('url', ''),
-                            selected_news['title'],
-                            selected_news.get('description', ''),
-                            selected_news['image_url']
-                        )
-                        if enhanced_post:
-                            logger.info("✅ Создан пост с изображением и карточкой ссылки")
-                            return enhanced_post
-                    except Exception as e:
-                        logger.warning(f"⚠️ Не удалось создать пост с изображением: {e}")
-                
-                # Fallback - добавляем URL и image_url к обычному посту
-                post.url = selected_news.get('url', '')
-                post.image_url = selected_news.get('image_url', '')
-                return post
-            
-            # Fallback - создаем простой человечный пост
-            return await self._create_personal_opinion_post()
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка создания новостного поста: {e}")
-            return await self._create_personal_opinion_post()
-    
+        Registry (STRAT-003) prefers ``self.quality_news_strategy`` under
+        ``STRATEGY_NAME``; this method remains for direct / getattr callers.
+        """
+        return await self.quality_news_strategy.create()
+
     async def _create_personal_opinion_post(self) -> RichTextPost:
         """Создает пост с личным мнением используя динамическую систему"""
         try:
@@ -2153,72 +2172,71 @@ class AutonomousBlueskyBotV2:
                 
                 start_time = datetime.now()
                 
-                # Используем единую HTTP сессию бота
-                await self._ensure_http_session()
+                # Shared session + retry_rss_http (RETRY-002)
+                status, content = await self._http_get_text_with_retry(
+                    feed_url, timeout=timeout
+                )
+                if status != 200:
+                    logger.warning(f"⚠️ {feed_url}: HTTP {status}")
+                    continue
 
-                async with self.http_session.get(feed_url, timeout=timeout) as response:
-                    if response.status != 200:
-                        logger.warning(f"⚠️ {feed_url}: HTTP {response.status}")
-                        continue
+                feed = feedparser.parse(content)
 
-                    content = await response.text()
-                    feed = feedparser.parse(content)
-                    
-                    fetch_time = (datetime.now() - start_time).total_seconds()
-                    
-                    # Ограичиваем записи для разнообразия (было 3, стало 4)
-                    entries_to_process = 4
-                    source_entries = []
-                    
-                    for entry in feed.entries[:entries_to_process]:
-                        entry_data = {
-                            'title': self.clean_html(entry.title),
-                            'url': entry.link,
-                            'description': self.clean_html(entry.get('summary', '')[:250]),
-                            'source': self.clean_html(feed.feed.title) if hasattr(feed.feed, 'title') else 'Unknown',
-                            'published': entry.get('published', ''),
-                            'fetch_time': fetch_time,
-                            'source_url': feed_url,
-                            'image_url': None,
-                            'priority_score': 0
-                        }
-                        
-                        # УЛУЧШЕННЫЙ поиск изображений
-                        image_url = self._enhanced_image_extraction(entry)
-                        entry_data['image_url'] = image_url
-                        
-                        # Расчет приоритета записи
-                        entry_data['priority_score'] = self._calculate_entry_priority(entry_data, feed_url)
-                        
-                        # Фильтруем только качественные записи
-                        if len(entry_data['title']) > 20 and entry_data['title'] != 'Unknown':
-                            source_entries.append(entry_data)
-                    
-                    if source_entries:
-                        all_entries.extend(source_entries)
-                        sources_used += 1
+                fetch_time = (datetime.now() - start_time).total_seconds()
 
-                        source_name = feed.feed.title if hasattr(feed.feed, 'title') else feed_url.split('//')[-1].split('/')[0]
-                        logger.info(f"✅ {source_name}: {len(source_entries)} записей за {fetch_time:.1f}с")
-                        # RSS Source Intelligence: record success
-                        try:
-                            self.rss_manager.record_fetch(
-                                feed_url,
-                                success=True,
-                                latency=fetch_time,
-                                entries=len(source_entries),
-                                duplicates=entries_to_process - len(source_entries),
-                            )
-                        except Exception:
-                            pass
-                    else:
-                        try:
-                            self.rss_manager.record_fetch(feed_url, success=False, latency=fetch_time)
-                        except Exception:
-                            pass
+                # Ограичиваем записи для разнообразия (было 3, стало 4)
+                entries_to_process = 4
+                source_entries = []
 
-                    # Пауза между источниками для вежливости
-                    await asyncio.sleep(0.3)
+                for entry in feed.entries[:entries_to_process]:
+                    entry_data = {
+                        'title': self.clean_html(entry.title),
+                        'url': entry.link,
+                        'description': self.clean_html(entry.get('summary', '')[:250]),
+                        'source': self.clean_html(feed.feed.title) if hasattr(feed.feed, 'title') else 'Unknown',
+                        'published': entry.get('published', ''),
+                        'fetch_time': fetch_time,
+                        'source_url': feed_url,
+                        'image_url': None,
+                        'priority_score': 0
+                    }
+
+                    # УЛУЧШЕННЫЙ поиск изображений
+                    image_url = self._enhanced_image_extraction(entry)
+                    entry_data['image_url'] = image_url
+
+                    # Расчет приоритета записи
+                    entry_data['priority_score'] = self._calculate_entry_priority(entry_data, feed_url)
+
+                    # Фильтруем только качественные записи
+                    if len(entry_data['title']) > 20 and entry_data['title'] != 'Unknown':
+                        source_entries.append(entry_data)
+
+                if source_entries:
+                    all_entries.extend(source_entries)
+                    sources_used += 1
+
+                    source_name = feed.feed.title if hasattr(feed.feed, 'title') else feed_url.split('//')[-1].split('/')[0]
+                    logger.info(f"✅ {source_name}: {len(source_entries)} записей за {fetch_time:.1f}с")
+                    # RSS Source Intelligence: record success
+                    try:
+                        self.rss_manager.record_fetch(
+                            feed_url,
+                            success=True,
+                            latency=fetch_time,
+                            entries=len(source_entries),
+                            duplicates=entries_to_process - len(source_entries),
+                        )
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        self.rss_manager.record_fetch(feed_url, success=False, latency=fetch_time)
+                    except Exception:
+                        pass
+
+                # Пауза между источниками для вежливости
+                await asyncio.sleep(0.3)
 
             except asyncio.TimeoutError:
                 source_name = feed_url.split('//')[-1].split('/')[0]
@@ -2930,15 +2948,15 @@ class AutonomousBlueskyBotV2:
         except Exception as e:
             logger.error(f"❌ Ошибка сохранения памяти при завершении: {e}")
         
-        # НОВОЕ: Закрываем aiohttp сессию в PollinationsAI
+        # Detach AI adapter from shared session (does not close bot-owned session)
         try:
             if hasattr(self, 'pollinations_ai') and self.pollinations_ai:
                 await self.pollinations_ai.close_session()
-                logger.info("🔒 Pollinations.AI сессия закрыта")
+                logger.info("🔒 AI adapter detached from shared HTTP session")
         except Exception as e:
-            logger.warning(f"⚠️ Ошибка закрытия Pollinations сессии: {e}")
+            logger.warning(f"⚠️ Ошибка detach AI HTTP session: {e}")
         
-        # Закрываем основную HTTP сессию
+        # Закрываем основную HTTP сессию (sole owner)
         if hasattr(self, 'http_session'):
             await close_http_session(self.http_session)
             self.http_session = None

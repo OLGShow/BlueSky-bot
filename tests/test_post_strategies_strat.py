@@ -147,6 +147,45 @@ class TestPostStrategyRegistry(unittest.TestCase):
         self.assertEqual(missing, ["_nope"])
         self.assertIn("_create_quality_news_post", reg2)
 
+    def test_hybrid_overwrite_prefers_extracted_strategy_instance(self):
+        """STRAT-003: registry key stays stable; extracted strategy wins over bound."""
+
+        class ExtractedStrategy:
+            async def create(self) -> str:
+                return "from-extracted"
+
+        class Owner:
+            async def _create_quality_news_post(self) -> str:
+                return "from-bound"
+
+            async def _create_personal_opinion_post(self) -> str:
+                return "opinion"
+
+        owner = Owner()
+        registry, registered, missing = build_bound_registry(
+            owner,
+            ["_create_quality_news_post", "_create_personal_opinion_post"],
+        )
+        self.assertEqual(missing, [])
+        extracted = ExtractedStrategy()
+        registry.register(
+            "_create_quality_news_post", extracted, overwrite=True
+        )
+
+        stored = registry.get("_create_quality_news_post")
+        self.assertIs(stored, extracted)
+        self.assertNotIsInstance(stored, CallablePostStrategy)
+        self.assertEqual(
+            asyncio.run(registry.resolve("_create_quality_news_post")()),
+            "from-extracted",
+        )
+        # Other keys remain bound-method wrappers; learning key string unchanged.
+        self.assertIn("_create_quality_news_post", registered)
+        self.assertEqual(
+            asyncio.run(registry.resolve("_create_personal_opinion_post")()),
+            "opinion",
+        )
+
 
 if __name__ == "__main__":
     os.chdir(REPO_ROOT)

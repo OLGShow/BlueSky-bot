@@ -12,6 +12,8 @@ import logging
 from typing import Optional, Dict, Any, List
 import time
 
+from resilience_service import RetryPolicy
+
 logger = logging.getLogger(__name__)
 
 class PollinationsAI:
@@ -39,17 +41,30 @@ class PollinationsAI:
         'dall-e-3': 'dall-e-3'          # DALL-E 3 для генерации изображений
     }
     
-    def __init__(self, default_model: str = 'creative', language: str = 'en'):
+    def __init__(
+        self,
+        default_model: str = 'creative',
+        language: str = 'en',
+        http_session: Optional[aiohttp.ClientSession] = None,
+        retry_policy: Optional[RetryPolicy] = None,
+    ):
         """
         Initialize adapter for BlueSky audience
         
         Args:
             default_model: Default model ('creative', 'powerful', etc.)
             language: Generation language ('en', 'ru')
+            http_session: Optional shared ClientSession (caller owns lifecycle)
+            retry_policy: Optional RetryPolicy from composition root (RETRY-002)
         """
         self.default_model_key = default_model
         self.language = language
-        self._session = None  # Будет создана в get_session()
+        # Shared session: lifecycle owned by bot/http_session helpers (_owns_session=False).
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._owns_session: bool = True
+        if http_session is not None:
+            self.set_http_session(http_session)
+        self._retry_policy: RetryPolicy = retry_policy or RetryPolicy(max_retries=3, retry_budget=10)
         
         # Usage statistics
         self.stats = {
@@ -62,27 +77,54 @@ class PollinationsAI:
         
         logger.info(f"🚀 Pollinations.AI adapter initialized for {language.upper()} audience")
         logger.info(f"📊 Available models: {list(self.MODELS.keys())}")
+
+    def _default_headers(self) -> Dict[str, str]:
+        return {'User-Agent': 'BlueSky-Bot/2.1 (Python/aiohttp)'}
+
+    def set_http_session(self, session: Optional[aiohttp.ClientSession]) -> None:
+        """Inject shared ClientSession; caller owns create/recreate/close.
+
+        Pass ``None`` to detach shared session (private fallback may be created later).
+        """
+        if session is not None:
+            self._session = session
+            self._owns_session = False
+        else:
+            self._session = None
+            self._owns_session = True
+
+    def set_retry_policy(self, policy: Optional[RetryPolicy]) -> None:
+        """Inject outbound RetryPolicy from composition root (RETRY-002)."""
+        self._retry_policy = policy or RetryPolicy(max_retries=3, retry_budget=10)
     
     async def get_session(self) -> aiohttp.ClientSession:
-        """Получение или создание aiohttp сессии"""
+        """Return shared session when injected; else create a private one."""
+        if not self._owns_session:
+            if self._session is None or self._session.closed:
+                raise RuntimeError(
+                    "Shared HTTP session is closed or unset; "
+                    "lifecycle owner must inject a live ClientSession"
+                )
+            return self._session
+
         if self._session is None or self._session.closed:
             timeout = aiohttp.ClientTimeout(total=60, connect=30)
             connector = aiohttp.TCPConnector(limit=10, limit_per_host=5)
             self._session = aiohttp.ClientSession(
                 timeout=timeout,
                 connector=connector,
-                headers={
-                    'User-Agent': 'BlueSky-Bot/2.1 (Python/aiohttp)'
-                }
+                headers=self._default_headers(),
             )
-            logger.debug("🔗 Создана новая aiohttp сессия")
+            self._owns_session = True
+            logger.debug("🔗 Создана новая aiohttp сессия (private)")
         return self._session
     
     async def close_session(self):
-        """Закрытие aiohttp сессии"""
-        if self._session and not self._session.closed:
+        """Close private session only; shared sessions are owned by the injector."""
+        if self._owns_session and self._session is not None and not self._session.closed:
             await self._session.close()
             logger.debug("🔒 aiohttp сессия закрыта")
+        self._session = None
     
     def _get_model_name(self, model_key: str) -> str:
         """Получение реального имени модели"""
@@ -202,64 +244,41 @@ class PollinationsAI:
             logger.info(f"🎲 Используется fallback контент ({len(fallback)} символов)")
             return fallback
     
-    async def _make_request(self, url: str, params: Dict[str, Any], timeout: int = 30) -> Optional[str]:
-        """ПОЛНОСТЬЮ асинхронный HTTP запрос с aiohttp"""
-        max_retries = 3
-        base_delay = 5
-        
+    async def _make_request_once(self, url: str, params: Dict[str, Any], timeout: int = 30) -> Optional[str]:
+        """Single Pollinations text GET; raises on retryable / client HTTP errors."""
         session = await self.get_session()
-        
-        for attempt in range(max_retries):
-            try:
-                async with session.get(url, params=params) as response:
-                    logger.debug(f"📡 HTTP {response.status}: {url[:100]}...")
-                    
-                    # Проверяем статус ответа
-                    if response.status == 429:
-                        # Rate limiting - экспоненциальная задержка
-                        retry_delay = base_delay * (2 ** attempt) + random.uniform(1, 3)
-                        logger.warning(f"⚠️ Rate limit (429). Попытка {attempt + 1}/{max_retries}. Ожидание {retry_delay:.1f} сек")
-                        
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(retry_delay)
-                            continue
-                        else:
-                            logger.error("❌ Превышен лимит попыток для rate limiting")
-                            return None
-                    
-                    elif response.status == 200:
-                        content = await response.text()
-                        content = content.strip()
-                        if content:
-                            logger.debug(f"✅ Успешный HTTP запрос: {len(content)} символов")
-                            return content
-                        else:
-                            logger.warning("⚠️ Пустой ответ от сервера")
-                            return None
-                    else:
-                        # Другие HTTP ошибки
-                        error_text = await response.text()
-                        logger.warning(f"📡 HTTP {response.status}: {error_text[:100]}")
-                        
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(base_delay * (attempt + 1))
-                            continue
-                        else:
-                            return None
-                            
-            except asyncio.TimeoutError:
-                logger.warning(f"⏱️ Timeout при запросе (попытка {attempt + 1}/{max_retries})")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(base_delay * (attempt + 1))
-                    continue
-            except Exception as e:
-                logger.warning(f"📡 HTTP ошибка (попытка {attempt + 1}/{max_retries}): {e}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(base_delay * (attempt + 1))
-                    continue
-        
-        logger.error("❌ Не удалось выполнить HTTP запрос после нескольких попыток")
-        return None
+        try:
+            async with session.get(
+                url, params=params, headers=self._default_headers()
+            ) as response:
+                logger.debug(f"📡 HTTP {response.status}: {url[:100]}...")
+                if response.status == 429:
+                    raise RuntimeError(f"HTTP 429 rate limit from Pollinations")
+                if response.status >= 500:
+                    error_text = await response.text()
+                    raise RuntimeError(f"HTTP {response.status}: {error_text[:200]}")
+                if response.status != 200:
+                    error_text = await response.text()
+                    raise RuntimeError(f"HTTP {response.status}: {error_text[:200]}")
+
+                content = (await response.text()).strip()
+                if content:
+                    logger.debug(f"✅ Успешный HTTP запрос: {len(content)} символов")
+                    return content
+                logger.warning("⚠️ Пустой ответ от сервера")
+                return None
+        except asyncio.TimeoutError as e:
+            raise TimeoutError("Pollinations request timed out") from e
+
+    async def _make_request(self, url: str, params: Dict[str, Any], timeout: int = 30) -> Optional[str]:
+        """Async HTTP GET with RetryPolicy (no ad-hoc sleep loops)."""
+        try:
+            return await self._retry_policy.execute(
+                self._make_request_once, url, params, timeout
+            )
+        except Exception as e:
+            logger.error(f"❌ Pollinations HTTP exhausted / failed: {e}")
+            return None
     
     def _generate_fallback_content(self, prompt: str) -> str:
         """Генерация fallback контента в зависимости от языка"""
@@ -420,56 +439,41 @@ class PollinationsAI:
             logger.warning(f"⚠️ Ошибка генерации изображения: {e}")
             return None
     
-    async def _make_image_request(self, url: str, params: Dict[str, Any], timeout: int = 90) -> Optional[bytes]:
-        """ПОЛНОСТЬЮ асинхронный HTTP запрос для получения изображения с aiohttp"""
-        max_retries = 2
-        base_delay = 10
-        
+    async def _make_image_request_once(
+        self, url: str, params: Dict[str, Any], timeout: int = 90
+    ) -> Optional[bytes]:
+        """Single Pollinations image GET; raises on retryable / client HTTP errors."""
         session = await self.get_session()
-        
-        for attempt in range(max_retries):
-            try:
-                async with session.get(url, params=params) as response:
-                    logger.debug(f"📡 Запрос изображения, HTTP {response.status}: {url[:100]}...")
-                    
-                    if response.status == 200:
-                        image_data = await response.read()
-                        if image_data:
-                            logger.debug(f"✅ Получено изображение: {len(image_data)} байт")
-                            return image_data
-                        else:
-                            logger.warning("⚠️ Пустой ответ (изображение)")
-                            return None
-                    
-                    # Обработка ошибок
-                    if response.status == 429:
-                        retry_delay = base_delay * (2 ** attempt) + random.uniform(1, 3)
-                        logger.warning(f"⚠️ Rate limit (429) для изображений. Попытка {attempt + 1}/{max_retries}. Ожидание {retry_delay:.1f} сек")
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(retry_delay)
-                            continue
-                    
-                    # Для других ошибок
-                    error_text = await response.text()
-                    logger.warning(f"📡 HTTP {response.status} для изображения: {error_text[:100]}")
-                    
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(base_delay * (attempt + 1))
-                        continue
+        try:
+            async with session.get(
+                url, params=params, headers=self._default_headers()
+            ) as response:
+                logger.debug(f"📡 Запрос изображения, HTTP {response.status}: {url[:100]}...")
+                if response.status == 200:
+                    image_data = await response.read()
+                    if image_data:
+                        logger.debug(f"✅ Получено изображение: {len(image_data)} байт")
+                        return image_data
+                    logger.warning("⚠️ Пустой ответ (изображение)")
+                    return None
+                if response.status == 429:
+                    raise RuntimeError("HTTP 429 rate limit for Pollinations image")
+                error_text = await response.text()
+                raise RuntimeError(f"HTTP {response.status}: {error_text[:200]}")
+        except asyncio.TimeoutError as e:
+            raise TimeoutError("Pollinations image timed out") from e
 
-            except asyncio.TimeoutError:
-                logger.warning(f"⏱️ Timeout при запросе изображения (попытка {attempt + 1}/{max_retries})")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(base_delay * (attempt + 1))
-                    continue
-            except Exception as e:
-                logger.warning(f"📡 HTTP ошибка изображения (попытка {attempt + 1}/{max_retries}): {e}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(base_delay * (attempt + 1))
-                    continue
-        
-        logger.error("❌ Не удалось получить изображение после нескольких попыток.")
-        return None
+    async def _make_image_request(
+        self, url: str, params: Dict[str, Any], timeout: int = 90
+    ) -> Optional[bytes]:
+        """Image GET with RetryPolicy (no ad-hoc sleep loops)."""
+        try:
+            return await self._retry_policy.execute(
+                self._make_image_request_once, url, params, timeout
+            )
+        except Exception as e:
+            logger.error(f"❌ Pollinations image exhausted / failed: {e}")
+            return None
     
     def get_statistics(self) -> Dict[str, Any]:
         """Получение статистики использования"""
@@ -496,7 +500,9 @@ class PollinationsAI:
             params = self._prepare_params(model_key='fast')
             
             session = await self.get_session()
-            async with session.get(url, params=params) as response:
+            async with session.get(
+                url, params=params, headers=self._default_headers()
+            ) as response:
                 if response.status == 200:
                     logger.info("✅ Подключение к Pollinations.AI успешно")
                     return True

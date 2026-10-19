@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Added
+- Strategy package `app/strategies/` — `QualityNewsStrategy` + news ports; hybrid registry overwrite for `_create_quality_news_post` (STRAT-001…003)
+- Unified quality pipeline (`quality_pipeline.py`) — `QualityPipeline.evaluate` / `regenerate_until_quality` on scheduled post (QUAL-001 / QUAL-002)
+- Outbound `RetryPolicy` factory (`OutboundRetryPolicies`) + hermetic retry tests (`tests/test_retry_policy_retry002.py`) (RETRY-001 / RETRY-002)
+- Quality pipeline hermetic tests (`tests/test_quality_pipeline_qual002.py`)
 - Content ports (`content_ports.py`) — `PromptContextPort` / `BackgroundSchedulerPort` / `ContentPorts`; `ContentService` no longer takes `bot` (CONT-001…004)
 - ContentService hermetic port tests (`tests/test_content_ports_cont004.py`) + registry dispatch tests (`tests/test_post_strategies_strat.py`)
 - Engagement ports (`engagement_ports.py`) — Protocols for client/ledger/budget/dry-run/stats; `EngagementService` no longer takes `bot` (REF-001 / REF-002)
@@ -22,7 +26,9 @@
 - Audit deferred/FP tracking: [ISS-001](../develop/issues/ISS-001-audit-deferred-fp-findings.md)
 
 ### Changed
-- Full `post_strategies` registry registration + `create_scheduled_post` dispatch via `weighted_entries` / `resolve` (STRAT-001 / STRAT-002); strategy-family extract to `app/strategies/` still deferred (STRAT-003)
+- OpenRouter / Pollinations use injected shared `ClientSession` + `RetryPolicy.execute`; RSS GET via `_http_get_text_with_retry` (RETRY-002 / HTTP-001)
+- Packaging sync includes `strategies/` package dir + `quality_pipeline.py` under `opt/`
+- Full `post_strategies` registry registration + `create_scheduled_post` dispatch via `weighted_entries` / `resolve` (STRAT-001 / STRAT-002); news family extracted (STRAT-003); other families still deferred
 - Packaging sync includes `content_ports.py` (and prior `engagement_ports.py` / `post_strategies.py`) mirrors under `opt/`
 - Single systemd unit SoT (`systemd/bluesky-bot.service`); `build-deb.sh` copies unit via `cp` (LAY-003)
 - `opt/bluesky-bot/env.example` aligned with root SoT (LAY-002)
@@ -35,6 +41,7 @@
 - Bluesky empty/whitespace handle/password fail-fast in `main()` (VER-001)
 
 ### Fixed
+- STRAT-003 + RetryPolicy / Quality / Shared HTTP cycle (`orch-2026-10-19-17-06-strat003-io`) — smoke 2/2; unittest 193 OK (3 skipped); see [implementation report](../develop/reports/2026-10-19-strat003-retry-quality-http-implementation.md)
 - God Object Phase 2+ ContentService ports + strategy registry wiring (`orch-2026-10-19-15-06-godobj-p2`) — see [implementation report](../develop/reports/2026-10-19-god-object-phase2-content-strategies-implementation.md)
 - Layout hygiene Stages 1–4: untracked root `__pycache__/`, env.example drift, systemd SoT/heredoc, opt docs (`orch-2026-10-19-14-33-layout-godobj`) — see [implementation report](../develop/reports/2026-10-19-layout-and-god-object-prep-implementation.md)
 - Backlog follow-up P0–P2 cycle (`orch-2026-10-19-13-45-backlog-followup`) — see [implementation report](../develop/reports/2026-10-19-backlog-followup-implementation.md)

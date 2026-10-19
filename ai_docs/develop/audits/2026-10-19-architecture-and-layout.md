@@ -1,84 +1,102 @@
 # Architecture + Layout Audit — 2026-10-19
 
-**Agents:** [senior-reviewer](9fa9e143-7737-4b56-9353-ab7c205caa5d) + [repo-organizer](03dd8eae-1c7d-440b-a7dd-24cf3ea53d08)  
-**Scope:** code architecture (`app/`) + local file organization  
-**Code health:** Needs Improvement — **5.5/10**  
-**Layout health:** Good after Stage 1–5 cleanup; residual hygiene remains
+**Baseline agents:** [senior-reviewer](9fa9e143-7737-4b56-9353-ab7c205caa5d) + [repo-organizer](03dd8eae-1c7d-440b-a7dd-24cf3ea53d08)  
+**Re-audit agents:** [senior-reviewer](8075bcbb-7df0-4650-ad8e-06f5b3dffe5e) + [repo-organizer](71a36f86-fc13-48ed-a1b4-bc56cb9972c4)  
+**Scope:** code architecture (`app/`) + local file organization
+
+| | Baseline (afternoon) | Re-audit (after Phase 1–2) |
+|--|---------------------:|---------------------------:|
+| **Code health** | Needs Improvement — **5.5/10** | Needs Improvement — **6.5/10** (**+1.0**) |
+| **Layout health** | Good; residual hygiene | **Healthy** (Stages 1–4 closed) |
 
 ---
 
-## Executive summary
+## Executive summary (re-audit)
 
 | Lens | Verdict |
 |------|---------|
-| **Local files** | SoT in `app/`, ops in `docs/ops/`, packaging aligned — structure OK |
-| **Code architecture** | Periphery extracted well; `AutonomousBlueskyBotV2` still God Object |
+| **Local files** | Hygiene Stages 1–4 **done**; only optional leftovers |
+| **Code architecture** | DIP + registry **improved**; God Object / Retry / dual quality / multi-session **unchanged** |
 
-Next architectural work is **ports + use-case splits**, not more folder moves.
-
----
-
-## Code architecture (senior-reviewer)
-
-### Strengths
-- Solid extractions: `state_service`, `url_safety`, `http_session`, `growth_engine`
-- Acyclic import graph (services do not import `bluesky_bot_v2`)
-- Deploy SoT (`app/` → flat `opt/`) is coherent
-
-### Top issues
-| Sev | Issue |
-|-----|--------|
-| Critical | God Object `app/bluesky_bot_v2.py` (~4k LOC, ~80 methods) |
-| High | `EngagementService(bot)` / `ContentService(bot)` — no DIP/ports |
-| High | `RetryPolicy` underused; breakers incomplete |
-| Medium | Dual quality pipelines (`QualityGate` vs `ContentQualityAnalyzer`) |
-| Medium | Multiple aiohttp `ClientSession` owners |
-| Medium | Post strategies as private methods (OCP) |
-
-### Priority recommendations
-1. ADR: layering + «services must not take `bot`»
-2. Inject ports into engagement/content
-3. Strategy registry for posts
-4. Wire `RetryPolicy` on all outbound I/O
-5. One quality pipeline
-6. Shared HTTP session injection into adapters
-7. Domain unit tests (engagement, gate, strategies)
+**Bottom line:** layout is largely settled; code moved in the right direction (+1.0), but the next +1.0 needs STRAT-003 + resilience/HTTP/quality — not more folders.
 
 ---
 
-## Local file layout (repo-organizer) — AUDIT only
+## Code scores: before → after
 
-### Healthy
-- `app/` SoT, root `verify_bot.py` shim, `docs/ops/`, sync scripts from `app/`
-- Secrets/runtime ignored; `ai_docs` config-owned paths respected
+| Area | Baseline | Now | Δ |
+|------|:--------:|:---:|:-:|
+| Structure | 5 | **7** | **+2** |
+| Dependencies | 4 | **7** | **+3** |
+| Scalability | 5 | **5** | 0 |
+| Maintainability | 4 | **6** | **+2** |
+| Testability | 5 | **7** | **+2** |
+| **Overall** | **5.5** | **6.5** | **+1.0** |
 
-### Remaining hygiene
-| Item | Risk |
-|------|------|
-| Tracked root `__pycache__/` with stale `.pyc` | Low — remove from git |
-| `opt/.../env.example` drift vs root | Low — sync |
-| Triple systemd unit SoT (`systemd/` / `etc/` / build-deb heredoc) | Low–Med |
-| Local `opt/` ~223 MB (venv+logs, mostly ignored) | Low — document |
-| Three `bot_config.json` copies (currently identical) | Low — document SoT |
+### Improved
+| Was | Now |
+|-----|-----|
+| `EngagementService(bot)` / `ContentService(bot)` | Ports; no `self.bot` |
+| Strategies via hasattr only | Full registry + `weighted_entries` dispatch |
+| No layering ADR | ADR-001 Accepted |
+| Weak service unit tests | Hermetic ports/registry tests (~153 unittest) |
+| Layout hygiene open | Stages 1–4 closed |
 
-**Not recommended now:** untrack `opt/*.py` (Medium; separate decision).
+### Unchanged (still open)
+| Issue | Sev |
+|-------|-----|
+| God Object `bluesky_bot_v2.py` (~4k+ LOC; `_create_*` still on bot) | Critical |
+| `RetryPolicy` underused | High |
+| Dual quality (`QualityGate` vs `ContentQualityAnalyzer`) | Medium |
+| Multiple `ClientSession` owners | Medium |
+| STRAT-003 strategy class extract | Medium (deferred) |
 
-### Proposed FIX stages (awaiting approval)
-1. Remove committed `__pycache__/`
-2. Align `opt` `env.example` with root
-3. Single systemd unit SoT + `cp` in `build-deb.sh`
-4. `opt/README.md` (mirror vs local runtime)
-5. (optional later) untrack opt py
-6. (optional) bot_config sync documentation
+### Mild new notes
+- More composition-root glue (`_build_*_ports` / registry) without shrinking God Object LOC
+- Registry wraps bound methods → OCP incomplete until STRAT-003
+
+### Next levers (priority)
+1. STRAT-003 — extract strategy families off the bot  
+2. Wire `RetryPolicy` on outbound I/O  
+3. One quality pipeline  
+4. Shared HTTP session injection  
+
+### Delta note (2026-10-19 evening — `orch-2026-10-19-17-06-strat003-io`)
+
+Expected next-score drivers from the re-audit **completed this cycle** (formal re-score TBD):
+
+| Driver | Status after orch |
+|--------|-------------------|
+| STRAT-003 news-family extract + hybrid registry | ✅ Done (`QualityNewsStrategy`) |
+| `RetryPolicy` on outbound I/O | ✅ AI (OpenRouter/Pollinations) + RSS GET; ATProto/media leftover |
+| One quality pipeline | ✅ `QualityPipeline` on `create_scheduled_post` |
+| Shared HTTP session injection | 🟡 AI adapters done; formatter/rich_posts leftover |
+
+Remaining score pressure: God Object LOC, other `_create_*` families, formatter sessions, Phase 7 slices. Report: [2026-10-19-strat003-retry-quality-http-implementation.md](../reports/2026-10-19-strat003-retry-quality-http-implementation.md).
 
 ---
 
-## Checklist scores (code)
+## Layout: baseline hygiene → status
 
-| Area | Score |
-|------|------:|
-| Structure | 5/10 |
-| Dependencies | 4/10 |
-| Scalability | 5/10 |
-| Maintainability | 4/10 |
-| Testability | 5/10 |
+| Baseline item | Status |
+|---------------|--------|
+| Tracked root `__pycache__/` | **FIXED** |
+| `opt/.../env.example` drift | **FIXED** |
+| Triple systemd SoT + heredoc | **FIXED** (SoT=`systemd/`; build-deb `cp`; `etc/` intentional copy) |
+| Local `opt/` ~223 MB venv/logs | **OPEN** (expected; documented in `opt/README.md`) |
+| Triple `bot_config.json` | **OPEN** (identical; optional doc of SoT) |
+
+**Layout health: Healthy.** No mandatory FIX stages left. Optional: document `bot_config` SoT; later decide untrack `opt/*.py`.
+
+---
+
+## Baseline snapshot (frozen — afternoon audit)
+
+### Code architecture (then)
+**Strengths:** `state_service`, `url_safety`, `http_session`, `growth_engine`; acyclic imports; `app/` SoT.
+
+**Top issues then:** God Object; services take `bot`; RetryPolicy; dual quality; multi-session; strategies as private methods.
+
+### Layout (then)
+**Healthy:** `app/` SoT, ops docs, packaging.  
+**Remaining:** `__pycache__`, env drift, systemd triple SoT, opt size, bot_config copies.

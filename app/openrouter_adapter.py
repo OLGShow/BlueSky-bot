@@ -15,6 +15,8 @@ from typing import Any, Dict, Optional
 
 import aiohttp
 
+from resilience_service import RetryPolicy
+
 logger = logging.getLogger(__name__)
 
 
@@ -45,6 +47,8 @@ class OpenRouterAI:
         default_model: str = "creative",
         language: str = "en",
         model_id: Optional[str] = None,
+        http_session: Optional[aiohttp.ClientSession] = None,
+        retry_policy: Optional[RetryPolicy] = None,
     ):
         self.api_key = (api_key or os.getenv("OPENROUTER_API_KEY") or "").strip()
         if not self.api_key:
@@ -60,7 +64,14 @@ class OpenRouterAI:
         # All bot roles use the configured OpenRouter model (default: gpt-4o-mini)
         self.MODELS = {k: self.model_id for k in type(self).MODELS}
 
+        # Shared session: lifecycle owned by bot/http_session helpers (_owns_session=False).
         self._session: Optional[aiohttp.ClientSession] = None
+        self._owns_session: bool = True
+        if http_session is not None:
+            self.set_http_session(http_session)
+        # Outbound retries via injected RetryPolicy (RETRY-002); default if standalone.
+        self._retry_policy: RetryPolicy = retry_policy or RetryPolicy(max_retries=3, retry_budget=10)
+
         self.stats = {
             "requests_made": 0,
             "successful_requests": 0,
@@ -81,22 +92,53 @@ class OpenRouterAI:
     def _get_model_name(self, model_key: str) -> str:
         return self.MODELS.get(model_key, self.model_id)
 
+    def _auth_headers(self) -> Dict[str, str]:
+        """Per-request headers (required when using injected shared session)."""
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": os.getenv(
+                "OPENROUTER_HTTP_REFERER", "https://github.com/bluesky-bot"
+            ),
+            "X-Title": os.getenv("OPENROUTER_APP_TITLE", "BlueSky-Bot"),
+            "User-Agent": "BlueSky-Bot/2.1 (OpenRouter)",
+        }
+
+    def set_http_session(self, session: Optional[aiohttp.ClientSession]) -> None:
+        """Inject shared ClientSession; caller owns create/recreate/close.
+
+        Pass ``None`` to detach shared session (private fallback may be created later).
+        """
+        if session is not None:
+            self._session = session
+            self._owns_session = False
+        else:
+            self._session = None
+            self._owns_session = True
+
+    def set_retry_policy(self, policy: Optional[RetryPolicy]) -> None:
+        """Inject outbound RetryPolicy from composition root (RETRY-002)."""
+        self._retry_policy = policy or RetryPolicy(max_retries=3, retry_budget=10)
+
     async def get_session(self) -> aiohttp.ClientSession:
+        if not self._owns_session:
+            if self._session is None or self._session.closed:
+                raise RuntimeError(
+                    "Shared HTTP session is closed or unset; "
+                    "lifecycle owner must inject a live ClientSession"
+                )
+            return self._session
+
         if self._session is None or self._session.closed:
-            # Image models can take 30–90s
+            # Standalone / no injection: private session (not used when bot injects).
             timeout = aiohttp.ClientTimeout(total=120, connect=30)
             connector = aiohttp.TCPConnector(limit=10, limit_per_host=5)
             self._session = aiohttp.ClientSession(
                 timeout=timeout,
                 connector=connector,
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": os.getenv("OPENROUTER_HTTP_REFERER", "https://github.com/bluesky-bot"),
-                    "X-Title": os.getenv("OPENROUTER_APP_TITLE", "BlueSky-Bot"),
-                    "User-Agent": "BlueSky-Bot/2.1 (OpenRouter)",
-                },
+                headers=self._auth_headers(),
             )
+            self._owns_session = True
         return self._session
 
     @staticmethod
@@ -127,8 +169,10 @@ class OpenRouterAI:
             return None
 
     async def close_session(self) -> None:
-        if self._session and not self._session.closed:
+        """Close private session only; shared sessions are owned by the injector."""
+        if self._owns_session and self._session is not None and not self._session.closed:
             await self._session.close()
+        self._session = None
 
     def _get_system_prompt(self, content_type: str = "general") -> str:
         if self.language == "ru":
@@ -234,61 +278,47 @@ class OpenRouterAI:
             logger.warning("OpenRouter error: %s", e)
             return self._generate_fallback_content(prompt)
 
-    async def _chat_completion(self, payload: Dict[str, Any]) -> Optional[str]:
-        max_retries = 3
-        base_delay = 2
+    async def _chat_completion_once(self, payload: Dict[str, Any]) -> Optional[str]:
+        """Single OpenRouter chat POST; raises on retryable / client HTTP errors."""
         session = await self.get_session()
+        try:
+            async with session.post(
+                self.BASE_URL, json=payload, headers=self._auth_headers()
+            ) as response:
+                body = await response.text()
+                if response.status == 429:
+                    raise RuntimeError(f"HTTP 429 rate limit: {body[:200]}")
+                if response.status >= 500:
+                    raise RuntimeError(f"HTTP {response.status}: {body[:200]}")
+                if response.status >= 400:
+                    raise RuntimeError(f"HTTP {response.status}: {body[:200]}")
 
-        for attempt in range(max_retries):
-            try:
-                async with session.post(self.BASE_URL, json=payload) as response:
-                    body = await response.text()
-                    if response.status == 429:
-                        delay = base_delay * (2 ** attempt) + random.uniform(0.5, 1.5)
-                        logger.warning(
-                            "OpenRouter 429, retry %s/%s in %.1fs",
-                            attempt + 1,
-                            max_retries,
-                            delay,
-                        )
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(delay)
-                            continue
-                        return None
+                data = await response.json(content_type=None)
+                choices = data.get("choices") or []
+                if not choices:
+                    logger.warning("OpenRouter empty choices: %s", body[:300])
+                    return None
+                message = choices[0].get("message") or {}
+                content = message.get("content")
+                if isinstance(content, list):
+                    parts = []
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            parts.append(part.get("text") or "")
+                        elif isinstance(part, str):
+                            parts.append(part)
+                    content = "".join(parts)
+                return (content or "").strip() or None
+        except asyncio.TimeoutError as e:
+            raise TimeoutError("OpenRouter chat timed out") from e
 
-                    if response.status >= 400:
-                        logger.warning("OpenRouter HTTP %s: %s", response.status, body[:300])
-                        if attempt < max_retries - 1 and response.status >= 500:
-                            await asyncio.sleep(base_delay * (attempt + 1))
-                            continue
-                        return None
-
-                    data = await response.json(content_type=None)
-                    choices = data.get("choices") or []
-                    if not choices:
-                        logger.warning("OpenRouter empty choices: %s", body[:300])
-                        return None
-                    message = choices[0].get("message") or {}
-                    content = message.get("content")
-                    if isinstance(content, list):
-                        # Some providers return content parts
-                        parts = []
-                        for part in content:
-                            if isinstance(part, dict) and part.get("type") == "text":
-                                parts.append(part.get("text") or "")
-                            elif isinstance(part, str):
-                                parts.append(part)
-                        content = "".join(parts)
-                    return (content or "").strip() or None
-            except asyncio.TimeoutError:
-                logger.warning("OpenRouter timeout (%s/%s)", attempt + 1, max_retries)
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(base_delay * (attempt + 1))
-            except Exception as e:
-                logger.warning("OpenRouter request failed (%s/%s): %s", attempt + 1, max_retries, e)
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(base_delay * (attempt + 1))
-        return None
+    async def _chat_completion(self, payload: Dict[str, Any]) -> Optional[str]:
+        """Chat completion with RetryPolicy (no ad-hoc sleep loops)."""
+        try:
+            return await self._retry_policy.execute(self._chat_completion_once, payload)
+        except Exception as e:
+            logger.warning("OpenRouter chat exhausted / failed: %s", e)
+            return None
 
     async def generate_comment(self, post_text: str, comment_style: str = "supportive") -> str:
         if self.language == "ru":
@@ -393,75 +423,54 @@ class OpenRouterAI:
             logger.warning("OpenRouter image error: %s", e)
             return None
 
+    async def _generate_image_once(
+        self, payload: Dict[str, Any]
+    ) -> tuple[Optional[bytes], Optional[float]]:
+        """Single OpenRouter image POST; raises on retryable / client HTTP errors."""
+        session = await self.get_session()
+        try:
+            async with session.post(
+                self.IMAGE_URL, json=payload, headers=self._auth_headers()
+            ) as response:
+                body = await response.text()
+                if response.status == 429:
+                    raise RuntimeError(f"HTTP 429 rate limit: {body[:200]}")
+                if response.status >= 500:
+                    raise RuntimeError(f"HTTP {response.status}: {body[:200]}")
+                if response.status >= 400:
+                    raise RuntimeError(f"HTTP {response.status}: {body[:200]}")
+
+                data = await response.json(content_type=None)
+                items = data.get("data") or []
+                if not items:
+                    logger.warning("OpenRouter image empty data: %s", body[:300])
+                    return None, None
+
+                item = items[0] or {}
+                b64 = item.get("b64_json") or item.get("b64") or ""
+                if not b64 and item.get("url"):
+                    async with session.get(item["url"]) as img_resp:
+                        if img_resp.status == 200:
+                            content = await img_resp.read()
+                            usage = data.get("usage") or {}
+                            return content, usage.get("cost")
+                        return None, None
+
+                decoded = self._decode_image_b64(b64)
+                usage = data.get("usage") or {}
+                return decoded, usage.get("cost")
+        except asyncio.TimeoutError as e:
+            raise TimeoutError("OpenRouter image timed out") from e
+
     async def _generate_image(
         self, payload: Dict[str, Any]
     ) -> tuple[Optional[bytes], Optional[float]]:
-        max_retries = 2
-        base_delay = 3
-        session = await self.get_session()
-
-        for attempt in range(max_retries):
-            try:
-                async with session.post(self.IMAGE_URL, json=payload) as response:
-                    body = await response.text()
-                    if response.status == 429:
-                        delay = base_delay * (2 ** attempt) + random.uniform(0.5, 1.5)
-                        logger.warning(
-                            "OpenRouter image 429, retry %s/%s in %.1fs",
-                            attempt + 1,
-                            max_retries,
-                            delay,
-                        )
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(delay)
-                            continue
-                        return None, None
-
-                    if response.status >= 400:
-                        logger.warning(
-                            "OpenRouter image HTTP %s: %s", response.status, body[:300]
-                        )
-                        if attempt < max_retries - 1 and response.status >= 500:
-                            await asyncio.sleep(base_delay * (attempt + 1))
-                            continue
-                        return None, None
-
-                    data = await response.json(content_type=None)
-                    items = data.get("data") or []
-                    if not items:
-                        logger.warning("OpenRouter image empty data: %s", body[:300])
-                        return None, None
-
-                    item = items[0] or {}
-                    b64 = item.get("b64_json") or item.get("b64") or ""
-                    # Some providers return a URL instead of base64
-                    if not b64 and item.get("url"):
-                        async with session.get(item["url"]) as img_resp:
-                            if img_resp.status == 200:
-                                content = await img_resp.read()
-                                usage = data.get("usage") or {}
-                                return content, usage.get("cost")
-                            return None, None
-
-                    decoded = self._decode_image_b64(b64)
-                    usage = data.get("usage") or {}
-                    return decoded, usage.get("cost")
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "OpenRouter image timeout (%s/%s)", attempt + 1, max_retries
-                )
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(base_delay * (attempt + 1))
-            except Exception as e:
-                logger.warning(
-                    "OpenRouter image request failed (%s/%s): %s",
-                    attempt + 1,
-                    max_retries,
-                    e,
-                )
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(base_delay * (attempt + 1))
-        return None, None
+        """Image generation with RetryPolicy (no ad-hoc sleep loops)."""
+        try:
+            return await self._retry_policy.execute(self._generate_image_once, payload)
+        except Exception as e:
+            logger.warning("OpenRouter image exhausted / failed: %s", e)
+            return None, None
 
     def get_statistics(self) -> Dict[str, Any]:
         success_rate = 0.0

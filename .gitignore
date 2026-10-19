@@ -93,6 +93,10 @@ celerybeat.pid
 
 # Environments
 .env
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
 .venv
 env/
 venv/
@@ -121,16 +125,25 @@ dmypy.json
 # Bot specific files
 bot.log
 bot_memory.pkl
+**/bot_memory.pkl
 bot_memory.json
+**/bot_memory.json
 bot_heartbeat.txt
 monitor.log
 server-memory/
 serverMemory/
 rss_source_state.json
 action_ledger.jsonl
+**/action_ledger.jsonl
 dry_run_report.json
+# Local agent / verify output (never commit)
 reports/
+*_agent_report.json
+*_agent_report.md
+agents_summary.json
+security_bandit.json
 session.json
+**/session.json
 bot.lock
 packaging/dist/
 packaging/_stage/
@@ -145,7 +158,9 @@ packaging/_stage/
 .vscode/
 .idea/
 .cursor/
-BlueSky-bot/
+# Only ignore a nested clone at repo root (not opt/bluesky-bot or etc/bluesky-bot;
+# on Windows ignorecase, unanchored BlueSky-bot/ would match those paths).
+/BlueSky-bot/
 *.sublime-project
 *.sublime-workspace
 
@@ -156,3 +171,12 @@ Thumbs.db
 # Backup files
 *_backup.*
 бекап*.*
+
+# MIG-007 Paris server export (secrets + Linux runtime trees)
+etc/bluesky-bot/.env
+opt/bluesky-bot/.env
+opt/bluesky-bot/venv/
+opt/bluesky-bot/bot.log*
+var/lib/bluesky-bot/
+_mig007_stats.json
+*.SYMLINK.txt

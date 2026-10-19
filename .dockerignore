@@ -4,6 +4,7 @@
 
 # Python
 __pycache__
+**/__pycache__
 *.pyc
 *.pyo
 *.pyd
@@ -11,13 +12,29 @@ __pycache__
 venv/
 env/
 .venv/
+**/venv/
+**/.venv/
 
-# Secrets — NEVER include in images
+# Secrets — NEVER bake into images (root + nested)
+**/.env
+**/.env.*
 .env
 .env.local
 .env.*.local
+**/credentials.json
+**/*.pem
+**/*.key
+**/*secret*
+secrets/
+packaging/_stage/
 
-# Bot data / state
+# Bot data / state (root + nested)
+**/session.json
+**/bot_memory.json
+**/bot_memory.pkl
+**/bot_memory*
+**/action_ledger.jsonl
+session.json
 bot_memory.pkl
 bot_memory.json
 bot.log
@@ -29,8 +46,17 @@ bot_heartbeat.txt
 action_ledger.jsonl
 dry_run_report.json
 reports/
-session.json
 bot.lock
+
+# Host deploy trees: etc/ wholesale; opt/ runtime secrets + venvs
+etc/
+opt/**/.env
+opt/**/.env.*
+opt/**/session.json
+opt/**/bot_memory*
+opt/**/action_ledger.jsonl
+opt/**/venv/
+opt/**/.venv/
 
 # Development
 .vscode/
@@ -52,4 +78,4 @@ install.sh
 manage.sh
 monitor.sh
 update.sh
-start_bot.sh 
+start_bot.sh

@@ -1,5 +1,13 @@
 # BlueSky Bot Docker Image
 # ========================
+#
+# Secrets: do NOT bake credentials via ARG/ENV or COPY.
+# Rely on .dockerignore so nested etc/**/.env, opt/**/session.json, etc. never
+# enter the build context. At runtime pass config via mounts / env-file, e.g.:
+#   docker run --env-file /path/to/.env \
+#     -v /path/to/session.json:/app/session.json:ro \
+#     bluesky-bot
+#
 
 FROM python:3.11-slim
 
@@ -23,12 +31,12 @@ RUN groupadd -r botuser && useradd -r -g botuser botuser
 # Устанавливаем рабочую директорию
 WORKDIR /app
 
-# Копируем requirements.txt и устанавливаем зависимости
+# Копируем requirements.txt и устанавливаем зависимости (слой кэша)
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Копируем исходный код
+# Копируем исходный код (secrets excluded by .dockerignore — no ARG/ENV secrets)
 COPY . .
 
 # Создаем директории для данных и логов
@@ -42,10 +50,10 @@ USER botuser
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD python3 -c "import os; exit(0 if os.path.exists('bot.log') else 1)"
 
-# Переменные окружения по умолчанию
+# Non-secret runtime defaults only (credentials via --env-file / mounts)
 ENV PYTHONPATH=/app
 ENV LOG_LEVEL=INFO
 ENV BLUESKY_COMPLIANT_MODE=true
 
 # Точка входа
-CMD ["python3", "bluesky_bot_v2.py"] 
+CMD ["python3", "bluesky_bot_v2.py"]

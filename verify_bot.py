@@ -15,10 +15,25 @@ Tests:
  10. ActivityBudget (spend, limits, reset)
  11. EngagementService mode guard
  12. Scheduler (_is_posting_window)
+ 13. SEC-001 .gitignore nested secrets — SSOT: tests.run_sec001_assertions
+ 14. SEC-002 secret rotation runbook — SSOT: tests.run_sec002_assertions
+ 15. SEC-003 .dockerignore + Dockerfile — SSOT: tests.run_sec003_assertions
+ 16. SEC-004 SessionStore chmod 0o600 — SSOT: tests.run_sec004_assertions
+ 17. SEC-005 pickle gate ALLOW_PICKLE_MIGRATION — SSOT: tests.run_sec005_assertions
+ 18. VER-001 consolidated acceptance (ignore + session + pickle) [S2][S3][S4]
+ 19. REF-001 PostStrategy helper (_quality_theme_post) via AST (hermetic)
+ 20. SMOKE-001 post-deploy hermetic smoke (imports, config, DRY_RUN, fail-fast)
 
-Run:  python verify_bot.py
+Run:
+  python verify_bot.py              # full hardening suite
+  python verify_bot.py --smoke      # post-deploy hermetic smoke only
+  python scripts/smoke_check.py     # thin operator wrapper (same as --smoke)
+
+Exit codes: 0 = all checks passed, 1 = one or more failures.
+Optional: SMOKE_LIVE=1 enables DNS-only live gate (default off, no API login).
 """
 
+import argparse
 import asyncio
 import json
 import logging
@@ -248,20 +263,75 @@ def test_imports():
     import log_sanitizer
 
 
+# Legacy weak .gitignore / .dockerignore smoke checks → thin aliases to SEC SSOT.
 @test(".dockerignore excludes .env")
 def test_dockerignore():
-    with open('.dockerignore', 'r') as f:
-        content = f.read()
-    lines = [l.strip() for l in content.splitlines()]
-    assert '.env' in lines, ".env not excluded from docker build context"
+    """Thin alias of SEC-003 (legacy name kept for suite continuity)."""
+    from tests.test_dockerignore_sec003 import run_sec003_assertions
+    run_sec003_assertions()
 
 
 @test(".gitignore excludes state files")
 def test_gitignore():
-    with open('.gitignore', 'r') as f:
-        content = f.read()
-    for pattern in ['bot_memory.json', 'action_ledger.jsonl', 'dry_run_report.json', 'reports/']:
-        assert pattern in content, f"{pattern} not in .gitignore"
+    """Thin alias of SEC-001 (legacy name kept for suite continuity)."""
+    from tests.test_gitignore_sec001 import run_sec001_assertions
+    run_sec001_assertions()
+
+
+@test("SEC-001: .gitignore ignores nested etc/opt secrets (check-ignore)")
+def test_gitignore_sec001_nested_secrets():
+    """SSOT: tests.test_gitignore_sec001.run_sec001_assertions."""
+    from tests.test_gitignore_sec001 import run_sec001_assertions
+    run_sec001_assertions()
+
+
+@test("SEC-002: secret rotation runbook content (hermetic)")
+def test_secret_rotation_runbook_sec002():
+    """SSOT: tests.test_secret_rotation_runbook_sec002.run_sec002_assertions."""
+    from tests.test_secret_rotation_runbook_sec002 import run_sec002_assertions
+    run_sec002_assertions()
+
+
+@test("SEC-003: .dockerignore nested secrets + Dockerfile no secret ARG/ENV")
+def test_dockerignore_sec003():
+    """SSOT: tests.test_dockerignore_sec003.run_sec003_assertions."""
+    from tests.test_dockerignore_sec003 import run_sec003_assertions
+    run_sec003_assertions()
+
+
+@test("SEC-004: SessionStore.save chmod 0o600 (hermetic)")
+def test_session_store_chmod_sec004():
+    """SSOT: tests.test_session_store_chmod_sec004.run_sec004_assertions."""
+    from tests.test_session_store_chmod_sec004 import run_sec004_assertions
+    run_sec004_assertions()
+
+
+@test("SEC-005: pickle migration gated by ALLOW_PICKLE_MIGRATION (hermetic)")
+def test_pickle_gate_sec005():
+    """SSOT: tests.test_pickle_gate_sec005.run_sec005_assertions."""
+    from tests.test_pickle_gate_sec005 import run_sec005_assertions
+    run_sec005_assertions()
+
+
+@test("VER-001: consolidated acceptance ignore + session + pickle [S2][S3][S4]")
+def test_verify_acceptance_ver001():
+    """SSOT net: SEC-001 + SEC-003 + SEC-004 + SEC-005 via tests/."""
+    from tests.test_verify_acceptance_ver001 import run_ver001_assertions
+    run_ver001_assertions()
+
+
+@test("REF-001: PostStrategy helper _quality_theme_post (AST hermetic)")
+def test_post_strategy_helper_ref001():
+    """ai_insight + list_post delegate to shared _quality_theme_post."""
+    from tests.test_post_strategy_helper_ref001 import run_ref001_assertions
+    run_ref001_assertions()
+
+
+@test("SMOKE-001: post-deploy hermetic smoke (imports/config/DRY_RUN/fail-fast)")
+def test_smoke_smoke001():
+    """SSOT: tests.test_smoke_smoke001.run_smoke001_assertions (no live network)."""
+    from tests.test_smoke_smoke001 import run_smoke001_assertions
+    run_smoke001_assertions(include_live=False)
 
 
 # --- 8. SingleInstanceLock ---
@@ -409,45 +479,97 @@ def test_scheduling():
 
 # --- Run all ---
 
-def main():
-    print("=" * 60)
-    print("BlueSky Bot — Hardening Verification Suite")
-    print("=" * 60)
+_SMOKE_TEST_NAMES = (
+    "test_imports",
+    "test_smoke_smoke001",
+)
 
-    tests = [v for v in globals().values() if callable(v) and hasattr(v, '__wrapped__') or
-             (callable(v) and v.__name__.startswith('test_'))]
 
+def _parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="BlueSky Bot verification / post-deploy smoke suite",
+    )
+    parser.add_argument(
+        "--smoke",
+        action="store_true",
+        help="Hermetic post-deploy smoke only (imports, config, DRY_RUN, fail-fast)",
+    )
+    return parser.parse_args(argv)
+
+
+def _run_named_tests(names):
+    for fn_name in names:
+        fn = globals().get(fn_name)
+        if callable(fn):
+            fn()
+            continue
+        _results.append((fn_name, "FAIL", "test function not found"))
+        print(f"  [FAIL] {fn_name}: test function not found")
+
+
+def _run_all_tests():
     for fn_name in list(globals()):
         fn = globals()[fn_name]
-        if callable(fn) and fn_name.startswith('test_'):
+        if callable(fn) and fn_name.startswith("test_"):
             fn()
 
+
+def main(argv=None):
+    args = _parse_args(argv)
+    smoke_mode = bool(args.smoke)
+
+    print("=" * 60)
+    if smoke_mode:
+        print("BlueSky Bot — Post-Deploy Smoke Check (hermetic)")
+    else:
+        print("BlueSky Bot — Hardening Verification Suite")
+    print("=" * 60)
+
+    if smoke_mode:
+        _run_named_tests(_SMOKE_TEST_NAMES)
+        # Honour optional live gate only in dedicated smoke mode.
+        live = (os.getenv("SMOKE_LIVE") or "").strip().lower() in ("1", "true", "yes")
+        if live:
+            try:
+                from tests.test_smoke_smoke001 import check_optional_live_gate
+                check_optional_live_gate()
+                _results.append(("SMOKE-001 live gate (DNS)", "PASS", ""))
+                print("  [PASS] SMOKE-001 live gate (DNS)")
+            except Exception as e:
+                _results.append(("SMOKE-001 live gate (DNS)", "FAIL", str(e)))
+                print(f"  [FAIL] SMOKE-001 live gate (DNS): {e}")
+    else:
+        _run_all_tests()
+
     print()
-    passed = sum(1 for _, s, _ in _results if s == 'PASS')
-    failed = sum(1 for _, s, _ in _results if s == 'FAIL')
+    passed = sum(1 for _, s, _ in _results if s == "PASS")
+    failed = sum(1 for _, s, _ in _results if s == "FAIL")
     print(f"Results: {passed} passed, {failed} failed out of {len(_results)} tests")
+
+    report_name = "smoke_report.json" if smoke_mode else "verification_report.json"
+    report = {
+        "timestamp": datetime.now().isoformat(),
+        "mode": "smoke" if smoke_mode else "full",
+        "tests": [{"name": n, "status": s, "error": e} for n, s, e in _results],
+        "passed": passed,
+        "failed": failed,
+    }
+    os.makedirs("reports", exist_ok=True)
+    report_path = os.path.join("reports", report_name)
+    with open(report_path, "w") as f:
+        json.dump(report, f, indent=2)
+    print(f"\nReport saved: {report_path}")
 
     if failed:
         print("\nFailed tests:")
         for name, status, msg in _results:
-            if status == 'FAIL':
+            if status == "FAIL":
                 print(f"  - {name}: {msg}")
         sys.exit(1)
-    else:
-        print("\nAll tests passed!")
 
-    # Save report
-    report = {
-        'timestamp': datetime.now().isoformat(),
-        'tests': [{'name': n, 'status': s, 'error': e} for n, s, e in _results],
-        'passed': passed,
-        'failed': failed,
-    }
-    os.makedirs('reports', exist_ok=True)
-    with open(os.path.join('reports', 'verification_report.json'), 'w') as f:
-        json.dump(report, f, indent=2)
-    print(f"\nReport saved: reports/verification_report.json")
+    print("\nAll tests passed!")
+    sys.exit(0)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

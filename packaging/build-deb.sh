@@ -32,6 +32,8 @@ cp "$SCRIPT_DIR/deb/postrm"    "$STAGE/DEBIAN/postrm"
 chmod 755 "$STAGE/DEBIAN/postinst" "$STAGE/DEBIAN/prerm" "$STAGE/DEBIAN/postrm"
 
 # --- Application code ---
+# Root repo modules are the source of truth (SoT). Stage is built fresh from root;
+# keep this list in sync with packaging/sync-opt-from-sot.sh.
 PYFILES=(
     bluesky_bot_v2.py
     ai_improvements.py
@@ -43,11 +45,14 @@ PYFILES=(
     dynamic_content_system.py
     engagement_service.py
     growth_engine.py
+    http_session.py
     log_sanitizer.py
+    openrouter_adapter.py
     pollinations_adapter.py
     resilience_service.py
     rss_source_manager.py
     state_service.py
+    url_safety.py
     verify_bot.py
 )
 

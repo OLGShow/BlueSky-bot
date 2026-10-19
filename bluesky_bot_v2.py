@@ -13,7 +13,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timedelta
 from collections import Counter, defaultdict
-from typing import List, Dict, Optional, Set, Tuple
+from typing import List, Dict, Optional, Set, Tuple, Callable
 import aiohttp
 import feedparser
 from atproto import AsyncClient, models
@@ -32,8 +32,9 @@ from bot_learning_module import BotLearningModule
 from bluesky_post_formatter import BlueskyPostFormatter, PostTemplates, RichTextPost
 from bluesky_rich_posts import BlueskyRichPostCreator, PostFactory, ImageData, LinkCard
 
-# Добавляем импорт нашего адаптера
+# AI adapters: OpenRouter (preferred) or Pollinations (legacy)
 from pollinations_adapter import PollinationsAI
+from openrouter_adapter import OpenRouterAI
 
 # Импорт улучшений AI
 from ai_improvements import ContentQualityAnalyzer, EngagementOptimizer
@@ -51,7 +52,19 @@ from resilience_service import (
 )
 from log_sanitizer import SanitizingFilter
 from engagement_service import EngagementService
-from content_service import ContentService
+from content_service import (
+    ContentService,
+    OutboundContentError,
+    BLUESKY_MAX_GRAPHEMES,
+    validate_outbound_text,
+    split_graphemes,
+)
+from http_session import (
+    create_http_session,
+    ensure_http_session,
+    close_http_session,
+)
+from url_safety import UnsafeURLError, validate_outbound_url
 
 # Настройка логирования с абсолютным путем
 import sys
@@ -212,9 +225,9 @@ class AutonomousBlueskyBotV2:
     def __init__(self):
         """Инициализация автономного BlueSky бота"""
         
-        # Получаем креденциалы из переменных окружения
-        self.handle = os.getenv('BLUESKY_HANDLE')
-        self.password = os.getenv('BLUESKY_PASSWORD')
+        # Credentials: env-only (no interactive prompt / vault)
+        self.handle = (os.getenv('BLUESKY_HANDLE') or '').strip()
+        self.password = (os.getenv('BLUESKY_PASSWORD') or '').strip()
         
         if not self.handle or not self.password:
             raise ValueError("❌ Необходимо установить BLUESKY_HANDLE и BLUESKY_PASSWORD в переменных окружения")
@@ -230,20 +243,38 @@ class AutonomousBlueskyBotV2:
         self.http_session = None
         self._create_http_session()
         
-        # AI clients - Pollinations.AI priority with English language
-        self.pollinations_ai = PollinationsAI(default_model='creative', language='en')
-        self.ai_client = None  # OpenAI as backup
-        
-        # Инициализация OpenAI только как fallback
+        # AI clients — OpenRouter (gpt-4o-mini) preferred; Pollinations legacy fallback
+        bot_language = (os.getenv('BOT_LANGUAGE') or 'en').split('#', 1)[0].strip().lower()
+        if bot_language not in ('en', 'ru'):
+            bot_language = 'en'
+
+        openrouter_key = (os.getenv('OPENROUTER_API_KEY') or '').strip()
+        if openrouter_key:
+            self.pollinations_ai = OpenRouterAI(
+                api_key=openrouter_key,
+                default_model='creative',
+                language=bot_language,
+                model_id=os.getenv('OPENROUTER_MODEL') or 'openai/gpt-4o-mini',
+            )
+            logger.info(
+                "OpenRouter AI primary (%s), text=%s, image=%s",
+                bot_language.upper(),
+                getattr(self.pollinations_ai, 'model_id', 'openai/gpt-4o-mini'),
+                getattr(self.pollinations_ai, 'image_model_id', 'openai/gpt-image-1-mini'),
+            )
+        else:
+            self.pollinations_ai = PollinationsAI(default_model='creative', language=bot_language)
+            logger.warning("OPENROUTER_API_KEY not set — using legacy Pollinations.AI")
+
+        self.ai_client = None  # Direct OpenAI as optional backup
+
         openai_key = os.getenv('OPENAI_API_KEY')
         if openai_key and openai_key != 'your-openai-key':
             try:
                 self.ai_client = AsyncOpenAI(api_key=openai_key)
-                logger.info("📱 OpenAI клиент инициализирован как резервный")
+                logger.info("OpenAI client initialized as backup")
             except Exception as e:
-                logger.warning(f"⚠️ OpenAI недоступен (будет использоваться только Pollinations): {e}")
-        else:
-            logger.info("🚀 Работаем только с Pollinations.AI (OpenAI ключ не найден)")
+                logger.warning(f"OpenAI backup unavailable: {e}")
         
         # Инициализация форматировщиков с передачей клиента для резолва DID
         self.formatter = BlueskyPostFormatter(client=self.bluesky_client)
@@ -466,25 +497,28 @@ class AutonomousBlueskyBotV2:
             }
     
     def _create_http_session(self) -> None:
-        """Создает HTTP сессию с надежными таймаутами"""
-        timeout = aiohttp.ClientTimeout(
-            total=60,      # Общий таймаут запроса
-            connect=10,    # Таймаут соединения 
-            sock_read=30   # Таймаут чтения данных
+        """Создает HTTP сессию с надежными таймаутами (делегирует в http_session)."""
+        try:
+            self.http_session = create_http_session()
+        except Exception:
+            self.http_session = None
+            raise
+
+    async def _ensure_http_session(self, *, force_recreate: bool = False) -> aiohttp.ClientSession:
+        """Гарантирует живую shared ClientSession; при recreate — close, затем create."""
+
+        def _create() -> aiohttp.ClientSession:
+            self.http_session = None
+            self._create_http_session()
+            return self.http_session  # type: ignore[return-value]
+
+        self.http_session = await ensure_http_session(
+            self.http_session,
+            force_recreate=force_recreate,
+            create=_create,
         )
-        
-        self.http_session = aiohttp.ClientSession(
-            timeout=timeout,
-            connector=aiohttp.TCPConnector(
-                limit=20,           # Максимум 20 одновременных соединений
-                limit_per_host=5,   # Максимум 5 на хост
-                ttl_dns_cache=300,  # Кэш DNS на 5 минут
-                use_dns_cache=True,
-                keepalive_timeout=30
-            )
-        )
-        logger.info("🌐 HTTP сессия создана с защитными таймаутами")
-    
+        return self.http_session
+
     def _is_posting_window(self) -> bool:
         """Check scheduling config (quiet_hours / active_windows).
 
@@ -585,7 +619,7 @@ class AutonomousBlueskyBotV2:
             content_parts.append(image_url)
         
         content_string = "|".join(content_parts)
-        return hashlib.md5(content_string.encode('utf-8')).hexdigest()
+        return hashlib.md5(content_string.encode('utf-8'), usedforsecurity=False).hexdigest()
     
     def _is_duplicate_content(self, text: str, url: str = None, image_url: str = None) -> bool:
         """Проверяет, является ли контент дубликатом уже опубликованного"""
@@ -722,6 +756,60 @@ class AutonomousBlueskyBotV2:
         logger.info(f"   ❤️ Лайкнутые посты: {old_liked_count} -> {len(self.liked_posts)}")
         logger.info(f"   🔄 Репостнутые посты: {old_reposted_count} -> {len(self.reposted_posts)}")
         logger.info(f"   👥 Подписки сохранены: {old_followed_count} записей")
+
+    # Soft caps between weekly clearance (MED-001 cache bound).
+    _CACHE_SET_MAX = 5000
+    _CACHE_DICT_MAX = 500
+    _CONTENT_CACHE_MAX = 200
+
+    def _trim_set(self, values: set, limit: int) -> set:
+        if len(values) <= limit:
+            return values
+        # Sets are unordered; keep an arbitrary tail after list conversion.
+        return set(list(values)[-limit:])
+
+    def _trim_dict(self, mapping: dict, limit: int) -> dict:
+        if len(mapping) <= limit:
+            return mapping
+        keys = list(mapping.keys())[-limit:]
+        return {k: mapping[k] for k in keys}
+
+    def _trim_in_memory_caches(self) -> None:
+        """Bound in-memory caches to prevent unbounded growth (MED-001)."""
+        self.commented_posts = self._trim_set(self.commented_posts, self._CACHE_SET_MAX)
+        self.liked_posts = self._trim_set(self.liked_posts, self._CACHE_SET_MAX)
+        self.reposted_posts = self._trim_set(self.reposted_posts, self._CACHE_SET_MAX)
+        self.followed_users = self._trim_set(self.followed_users, self._CACHE_SET_MAX)
+        if len(self.recent_comments) > 50:
+            self.recent_comments = self.recent_comments[-50:]
+        if isinstance(self.hashtag_cache, dict):
+            self.hashtag_cache = self._trim_dict(self.hashtag_cache, self._CACHE_DICT_MAX)
+        if isinstance(self.user_cache, dict):
+            self.user_cache = self._trim_dict(self.user_cache, self._CACHE_DICT_MAX)
+        if isinstance(self.content_cache, list) and len(self.content_cache) > self._CONTENT_CACHE_MAX:
+            self.content_cache = self.content_cache[-self._CONTENT_CACHE_MAX:]
+        if len(getattr(self, '_trend_timeline_snippets', [])) > 100:
+            self._trend_timeline_snippets = self._trend_timeline_snippets[-100:]
+        if len(getattr(self, '_trend_rss_headlines', [])) > 50:
+            self._trend_rss_headlines = self._trend_rss_headlines[-50:]
+
+    def get_status(self) -> Dict:
+        """Lightweight local health/status snapshot (no network I/O)."""
+        http_ok = bool(
+            self.http_session is not None and not getattr(self.http_session, 'closed', True)
+        )
+        return {
+            'overall': 'ok',
+            'daily_posts': getattr(self, 'daily_post_count', 0),
+            'max_posts_per_day': getattr(self, 'max_posts_per_day', 0),
+            'liked_cache': len(getattr(self, 'liked_posts', ())),
+            'commented_cache': len(getattr(self, 'commented_posts', ())),
+            'content_cache': len(getattr(self, 'content_cache', [])),
+            'hashtag_cache': len(getattr(self, 'hashtag_cache', {})),
+            'user_cache': len(getattr(self, 'user_cache', {})),
+            'http_session_open': http_ok,
+            'rss_feeds': len(getattr(self, 'rss_feeds', [])),
+        }
     
     async def _create_fallback_post_for_duplicate(self) -> Optional[RichTextPost]:
         """Создает альтернативный пост когда основной оказался дубликатом"""
@@ -838,9 +926,7 @@ class AutonomousBlueskyBotV2:
 
     async def authenticate(self, force_login: bool = False) -> bool:
         """Session-first auth: restore persisted session, fallback to login."""
-        if not self.http_session:
-            self.http_session = aiohttp.ClientSession()
-            logger.info("🌐 HTTP сессия инициализирована")
+        await self._ensure_http_session()
 
         # --- Phase 1: try restoring a persisted session ---
         if not force_login:
@@ -1000,7 +1086,16 @@ class AutonomousBlueskyBotV2:
                         logger.warning("⚠️ Не удалось создать альтернативный пост. Пропускаем публикацию.")
                         return
                 
-                # Публикуем (или dry-run)
+                # Публикуем (или dry-run) — outbound validation at publish boundary
+                try:
+                    post = self._enforce_bluesky_text_limit(
+                        post, max_graphemes=BLUESKY_MAX_GRAPHEMES
+                    )
+                except OutboundContentError as e:
+                    logger.warning(
+                        f"⚠️ Контент отклонён на границе публикации: {e}"
+                    )
+                    return
                 if self.dry_run:
                     self.dry_run_log.log('send_post', text=post.text[:120], format=getattr(self, '_last_ab_format', 'unknown'))
                     return
@@ -1081,6 +1176,41 @@ class AutonomousBlueskyBotV2:
         functions, weights = zip(*strategies)
         return random.choices(functions, weights=weights)[0]
     
+    @staticmethod
+    def _split_graphemes(text: str) -> List[str]:
+        """Группирует текст в приближённые grapheme clusters (делегирует в content_service)."""
+        return split_graphemes(text)
+
+    def _enforce_bluesky_text_limit(
+        self, post: RichTextPost, max_graphemes: int = BLUESKY_MAX_GRAPHEMES
+    ) -> RichTextPost:
+        """Validate/sanitize outbound text and rebuild facets if changed.
+
+        Raises OutboundContentError when text is empty after sanitize.
+        Over-long text is safely truncated to max_graphemes.
+        """
+        old_text = post.text or ''
+        old_len = len(split_graphemes(old_text))
+        new_text = validate_outbound_text(old_text, max_graphemes=max_graphemes)
+        if new_text == old_text:
+            return post
+
+        new_len = len(split_graphemes(new_text))
+        if new_len < old_len:
+            logger.warning(
+                f"✂️ Текст обрезан до лимита Bluesky: {old_len} → {new_len} graphemes"
+            )
+        elif new_text != old_text:
+            logger.info("🧹 Исходящий текст очищен от управляющих символов")
+
+        post.text = new_text
+        try:
+            post.facets = self.formatter._extract_facets_sync(new_text)
+        except Exception as e:
+            logger.warning(f"Не удалось пересобрать facets после валидации: {e}")
+            post.facets = []
+        return post
+
     def _evaluate_post_quality(self, post: RichTextPost) -> bool:
         """УЛУЧШЕННАЯ оценка качества поста с анализом вирусного потенциала"""
         if not post or not post.text:
@@ -1308,6 +1438,36 @@ class AutonomousBlueskyBotV2:
             logger.error(f"❌ Error in dynamic personal opinion post: {e}")
             return await self._create_emergency_unique_post()
     
+    async def _quality_theme_post(
+        self,
+        themes: List[str],
+        *,
+        build_prompt: Callable[[str], str],
+        content_type: str,
+        model_key: str,
+        build_fallback: Callable[[str], Dict[str, str]],
+        image_topic: Optional[Callable[[str], str]] = None,
+    ) -> RichTextPost:
+        """Shared theme strategy: pick theme → structured AI → fallback → image post."""
+        selected_theme = random.choice(themes)
+
+        async def content_creator():
+            return await self.generate_structured_post_content(
+                build_prompt(selected_theme),
+                model_key=model_key,
+            )
+
+        async def fallback_creator():
+            return build_fallback(selected_theme)
+
+        topic = image_topic(selected_theme) if image_topic else selected_theme
+        return await self._create_post_with_image_generation(
+            content_creator,
+            topic,
+            content_type,
+            fallback_creator,
+        )
+
     async def _create_quality_ai_insight(self) -> RichTextPost:
         """Создает пост об AI с динамическими хештегами и изображением"""
         ai_aspects = [
@@ -1317,10 +1477,9 @@ class AutonomousBlueskyBotV2:
             "эволюция творческих процессов",
             "влияние на профессиональные навыки"
         ]
-        selected_aspect = random.choice(ai_aspects)
-        
-        async def content_creator():
-            ai_prompt = f"""
+
+        def build_prompt(selected_aspect: str) -> str:
+            return f"""
             Create a thoughtful social media post about "{selected_aspect}".
             Provide the output in JSON format with two keys: "post_text" (in English, 180-220 characters, personal and engaging - can end with a question, statement, observation, or emoji) and "hashtags" (in English, 3-4 relevant tags, starting with #).
 
@@ -1338,9 +1497,8 @@ class AutonomousBlueskyBotV2:
               "hashtags": "#AI #future #collaboration #tech"
             }}
             """
-            return await self.generate_structured_post_content(ai_prompt, model_key='powerful')
 
-        async def fallback_creator():
+        def build_fallback(_selected_aspect: str) -> Dict[str, str]:
             current_time = datetime.now().strftime("%H:%M")
             fallback_options = [
                 {
@@ -1358,11 +1516,12 @@ class AutonomousBlueskyBotV2:
             ]
             return random.choice(fallback_options)
 
-        return await self._create_post_with_image_generation(
-            content_creator,
-            selected_aspect,
-            'ai',
-            fallback_creator
+        return await self._quality_theme_post(
+            ai_aspects,
+            build_prompt=build_prompt,
+            content_type='ai',
+            model_key='powerful',
+            build_fallback=build_fallback,
         )
     
     async def _create_quality_tip_post(self) -> RichTextPost:
@@ -1409,10 +1568,9 @@ class AutonomousBlueskyBotV2:
             "языки программирования для изучения",
             "инструменты командной работы"
         ]
-        selected_theme = random.choice(list_themes)
-        
-        async def content_creator():
-            ai_prompt = f"""
+
+        def build_prompt(selected_theme: str) -> str:
+            return f"""
             Create a social media post based on the list idea: "{selected_theme}".
             Provide the output in JSON format. The "post_text" (in English, max 280 chars) should have a title, a short numbered list, and a natural ending (statement, emoji, question, or observation). The "hashtags" (in English) should be 3-4 relevant tags.
 
@@ -1426,9 +1584,8 @@ class AutonomousBlueskyBotV2:
               "hashtags": "#books #learning #development #career"
             }}
             """
-            return await self.generate_structured_post_content(ai_prompt, model_key='creative')
 
-        async def fallback_creator():
+        def build_fallback(_selected_theme: str) -> Dict[str, str]:
             current_time = datetime.now().strftime("%H:%M")
             fallback_options = [
                 {
@@ -1446,11 +1603,12 @@ class AutonomousBlueskyBotV2:
             ]
             return random.choice(fallback_options)
 
-        return await self._create_post_with_image_generation(
-            content_creator,
-            selected_theme,
-            'list',
-            fallback_creator
+        return await self._quality_theme_post(
+            list_themes,
+            build_prompt=build_prompt,
+            content_type='list',
+            model_key='creative',
+            build_fallback=build_fallback,
         )
     
     async def _create_quality_poll_post(self) -> RichTextPost:
@@ -1889,15 +2047,20 @@ class AutonomousBlueskyBotV2:
                 break
                 
             try:
+                try:
+                    feed_url = validate_outbound_url(feed_url)
+                except UnsafeURLError as e:
+                    logger.warning(f"⚠️ Unsafe RSS URL skipped: {e}")
+                    continue
+
                 # Адаптивный таймаут на основе истории
                 timeout = 20 if 'cnn.com' in feed_url else 15
                 
                 start_time = datetime.now()
                 
                 # Используем единую HTTP сессию бота
-                if not self.http_session:
-                    self.http_session = aiohttp.ClientSession()
-                
+                await self._ensure_http_session()
+
                 async with self.http_session.get(feed_url, timeout=timeout) as response:
                     if response.status != 200:
                         logger.warning(f"⚠️ {feed_url}: HTTP {response.status}")
@@ -2432,7 +2595,11 @@ class AutonomousBlueskyBotV2:
         try:
             # Используем асинхронный форматировщик для поддержки упоминаний
             formatted_comment = await self.formatter.create_post_async(comment_text, auto_format=True)
-            
+            # Outbound validation at comment publish boundary
+            formatted_comment = self._enforce_bluesky_text_limit(
+                formatted_comment, max_graphemes=BLUESKY_MAX_GRAPHEMES
+            )
+
             author_handle = getattr(post.post.author, 'handle', 'unknown') if hasattr(post.post, 'author') and post.post.author else 'unknown'
             logger.info(f"💬 Комментирование поста от {author_handle}")
             logger.info(f"    Комментарий: {formatted_comment.text}")
@@ -2463,7 +2630,9 @@ class AutonomousBlueskyBotV2:
                 'timestamp': datetime.now().isoformat(),
                 'relevance_score': 0.5  # Фиксированный балл для комментариев
             })
-            
+
+        except OutboundContentError as e:
+            logger.warning(f"⚠️ Комментарий отклонён на границе публикации: {e}")
         except Exception as e:
             logger.error(f"❌ Ошибка при комментировании: {e}")
     
@@ -2520,6 +2689,7 @@ class AutonomousBlueskyBotV2:
                 
                 # Сохранение памяти и очистка старых данных
                 if cycle_count % 20 == 0:
+                    self._trim_in_memory_caches()
                     # НОВОЕ: Сохраняем множества защиты от дубликатов в память
                     self.memory.commented_posts_cache = self.commented_posts
                     self.memory.recent_comments_cache = self.recent_comments[-20:]  # Последние 20
@@ -2674,9 +2844,9 @@ class AutonomousBlueskyBotV2:
             logger.warning(f"⚠️ Ошибка закрытия Pollinations сессии: {e}")
         
         # Закрываем основную HTTP сессию
-        if hasattr(self, 'http_session') and self.http_session:
-            await self.http_session.close()
-            logger.info("🔒 Основная HTTP сессия закрыта")
+        if hasattr(self, 'http_session'):
+            await close_http_session(self.http_session)
+            self.http_session = None
         
         # Закрываем соединения (AsyncClient не имеет метода close)
         if self.bluesky_client:
@@ -3165,12 +3335,17 @@ class AutonomousBlueskyBotV2:
     async def upload_image_to_bluesky(self, image_url: str) -> Optional[Dict]:
         """Загружает изображение в BlueSky и возвращает blob"""
         try:
+            try:
+                image_url = validate_outbound_url(image_url)
+            except UnsafeURLError as e:
+                logger.warning(f"⚠️ Unsafe image URL rejected: {e}")
+                return None
+
             logger.info(f"📸 Загружаю изображение: {image_url}")
             
             # Скачиваем изображение используя единую сессию бота
-            if not self.http_session:
-                self.http_session = aiohttp.ClientSession()
-            
+            await self._ensure_http_session()
+
             async with self.http_session.get(image_url, timeout=30) as response:
                     if response.status != 200:
                         logger.warning(f"⚠️ Не удалось скачать изображение: HTTP {response.status}")
@@ -3460,15 +3635,25 @@ class AutonomousBlueskyBotV2:
             }
             
             try:
+                try:
+                    feed_url = validate_outbound_url(feed_url)
+                    feed_status['url'] = feed_url
+                except UnsafeURLError as e:
+                    feed_status['status'] = 'unsafe_url'
+                    feed_status['error'] = str(e)[:100]
+                    diagnostics['failed_feeds'] += 1
+                    diagnostics['feeds_status'].append(feed_status)
+                    logger.warning(f"   ⚠️ {source_name}: unsafe URL ({e})")
+                    continue
+
                 logger.info(f"📡 Тестирование {i+1}/10: {source_name}")
                 
                 start_time = datetime.now()
                 timeout = 15
                 
                 # Используем единую HTTP сессию бота для диагностики
-                if not self.http_session:
-                    self.http_session = aiohttp.ClientSession()
-                
+                await self._ensure_http_session()
+
                 async with self.http_session.get(feed_url, timeout=timeout) as response:
                         response_time = (datetime.now() - start_time).total_seconds()
                         feed_status['response_time'] = response_time
@@ -3838,11 +4023,7 @@ class AutonomousBlueskyBotV2:
             # Переинициализация HTTP сессии при сетевых проблемах
             if 'bluesky_api_unavailable' in issues or 'internet_connectivity_issue' in issues:
                 try:
-                    if self.http_session:
-                        await self.http_session.close()
-                    self.http_session = aiohttp.ClientSession(
-                        timeout=aiohttp.ClientTimeout(total=30)
-                    )
+                    await self._ensure_http_session(force_recreate=True)
                     recovery_actions.append('http_session_reinitialized')
                 except Exception as e:
                     logger.warning(f"⚠️ Не удалось переинициализировать HTTP сессию: {e}")
@@ -3868,11 +4049,7 @@ class AutonomousBlueskyBotV2:
             logger.info("🧹 Кэши очищены")
             
             # 3. Переинициализируем HTTP сессию
-            if self.http_session:
-                await self.http_session.close()
-            self.http_session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=30)
-            )
+            await self._ensure_http_session(force_recreate=True)
             logger.info("🔄 HTTP сессия переинициализирована")
             
             # 4. Проверяем аутентификацию
@@ -3891,19 +4068,21 @@ class AutonomousBlueskyBotV2:
 async def main():
     load_dotenv(override=False)
 
-    config = {
-        'handle': os.getenv('BLUESKY_HANDLE', 'your-bot.bsky.social'),
-        'password': os.getenv('BLUESKY_PASSWORD', 'your-app-password'),
-        'openai_api_key': os.getenv('OPENAI_API_KEY', 'your-openai-key')
-    }
-    
-    if 'your-' in config['handle'] or 'your-' in config['password']:
+    # Fail-fast: require real Bluesky creds from env (no interactive prompt).
+    # Empty / whitespace / placeholder values must not reach bot construction.
+    handle = (os.getenv('BLUESKY_HANDLE') or '').strip()
+    password = (os.getenv('BLUESKY_PASSWORD') or '').strip()
+
+    creds_missing = not handle or not password
+    creds_placeholder = ('your-' in handle) or ('your-' in password)
+    if creds_missing or creds_placeholder:
         logger.error("❌ Необходимо настроить учетные данные!")
         logger.info("Установите переменные окружения:")
         logger.info("  BLUESKY_HANDLE - ваш handle в Bluesky")
         logger.info("  BLUESKY_PASSWORD - пароль приложения")
-        logger.info("  OPENAI_API_KEY - ключ API OpenAI")
-        return
+        logger.info("  OPENROUTER_API_KEY - ключ OpenRouter (предпочтительно)")
+        logger.info("  OPENAI_API_KEY - ключ API OpenAI (опциональный backup)")
+        sys.exit(1)
     
     instance_lock = SingleInstanceLock(
         path=os.path.join(log_dir, 'bot.lock'),
@@ -3913,7 +4092,7 @@ async def main():
         instance_lock.acquire()
     except RuntimeError as e:
         logger.error(f"❌ {e}")
-        return
+        sys.exit(1)
 
     try:
         bot = AutonomousBlueskyBotV2()

@@ -15,6 +15,8 @@ from urllib.parse import urlparse
 import emoji
 import logging
 
+from url_safety import UnsafeURLError, validate_outbound_url
+
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -341,7 +343,7 @@ class BlueskyPostFormatter:
                 return post
                 
             # Скачиваем изображение
-            import aiohttp
+            image_url = validate_outbound_url(image_url)
             async with aiohttp.ClientSession() as session:
                 async with session.get(image_url) as response:
                     if response.status == 200:
@@ -359,7 +361,9 @@ class BlueskyPostFormatter:
                             }]
                         }
                         
-        except Exception as e:
+        except UnsafeURLError:
+            pass
+        except Exception:
             # Если не удалось добавить изображение, продолжаем без него
             pass
             

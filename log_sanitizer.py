@@ -10,7 +10,8 @@ import os
 import sys
 
 _TOKEN_RE = re.compile(
-    r'(sk-[A-Za-z0-9_-]{20,})'   # OpenAI keys
+    r'(sk-or-v1-[A-Za-z0-9]{20,})'  # OpenRouter keys
+    r'|(sk-[A-Za-z0-9_-]{20,})'     # OpenAI / generic sk- keys
     r'|([A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4})'  # app passwords
     r'|(eyJ[A-Za-z0-9_-]{30,})',  # JWT-like tokens
 )

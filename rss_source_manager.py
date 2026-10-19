@@ -14,6 +14,8 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 
+from url_safety import UnsafeURLError, validate_outbound_url
+
 logger = logging.getLogger(__name__)
 
 SEED_FEEDS = {
@@ -146,6 +148,11 @@ class RSSSourceManager:
         self.save_state()
 
     def add_candidate(self, url: str, axis: str = 'general'):
+        try:
+            url = validate_outbound_url(url)
+        except UnsafeURLError as e:
+            logger.warning(f"📡 Rejected unsafe RSS candidate: {url!r} ({e})")
+            return
         if url not in self.sources:
             self.sources[url] = {
                 'url': url, 'axis': axis, 'state': 'probation',

@@ -1,0 +1,37 @@
+[Unit]
+Description=BlueSky Bot - Autonomous AI Social Media Bot
+Documentation=https://github.com/OLGShow/BlueSky-bot
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bluesky-bot
+Group=bluesky-bot
+WorkingDirectory=/opt/bluesky-bot
+EnvironmentFile=/etc/bluesky-bot/.env
+
+ExecStart=/opt/bluesky-bot/venv/bin/python /opt/bluesky-bot/bluesky_bot_v2.py
+
+Restart=always
+RestartSec=10
+StartLimitBurst=5
+StartLimitInterval=60
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bluesky-bot
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/bluesky-bot /var/lib/bluesky-bot /etc/bluesky-bot
+MemoryMax=512M
+
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -11,13 +11,34 @@ import pickle
 import shutil
 import tempfile
 import logging
+import threading
 import time as _time
+from contextlib import contextmanager
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, Generator, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
+# SessionStore: emit lock-unavailable warning at most once per process.
+_SESSION_LOCK_WARNED = False
+# Serialize threads before OS file locks (msvcrt is process-wide on Windows).
+_SESSION_THREAD_LOCKS: Dict[str, threading.RLock] = {}
+_SESSION_THREAD_LOCKS_GUARD = threading.Lock()
+
+
+def _session_thread_lock(lock_path: str) -> threading.RLock:
+    key = os.path.abspath(lock_path)
+    with _SESSION_THREAD_LOCKS_GUARD:
+        lock = _SESSION_THREAD_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _SESSION_THREAD_LOCKS[key] = lock
+        return lock
+
 SCHEMA_VERSION = 2
+
+# Hard cap for one-shot legacy pickle migration (insecure deserialization).
+_PICKLE_MAX_BYTES = 20 * 1024 * 1024  # 20 MiB
 
 _DEFAULT_RETENTION = {
     'successful_posts': 500,
@@ -127,8 +148,25 @@ class StateService:
             return self._fresh(memory_cls)
 
     def _migrate_pickle(self, memory_cls):
-        logger.info(f"Migrating state from pickle ({self.legacy_pickle}) to JSON ({self.path})...")
+        """One-shot legacy pickle -> JSON migration (gated, fail-closed by default).
+
+        Requires ``ALLOW_PICKLE_MIGRATION=1``. Without the flag, refuses
+        ``pickle.load`` and returns fresh memory (warn + fresh).
+        """
+        if os.environ.get("ALLOW_PICKLE_MIGRATION") != "1":
+            logger.warning(
+                "Legacy pickle %s present but ALLOW_PICKLE_MIGRATION is not '1'. "
+                "Refusing pickle.load; starting with fresh memory. "
+                "Set ALLOW_PICKLE_MIGRATION=1 for a one-shot migration, then remove the .pkl.",
+                self.legacy_pickle,
+            )
+            return self._fresh(memory_cls)
+
+        logger.info(
+            f"Migrating state from pickle ({self.legacy_pickle}) to JSON ({self.path})..."
+        )
         try:
+            self._validate_pickle_path(self.legacy_pickle)
             with open(self.legacy_pickle, 'rb') as f:
                 old_mem = pickle.load(f)
             data = self._memory_to_dict(old_mem)
@@ -140,8 +178,28 @@ class StateService:
             logger.info(f"Pickle migrated and archived as {archive}")
             return mem
         except Exception as e:
-            logger.error(f"Pickle migration failed: {e}. Starting fresh. THIS MEANS ALL PREVIOUS STATE IS LOST.")
+            logger.error(
+                f"Pickle migration failed: {e}. Starting fresh. "
+                "THIS MEANS ALL PREVIOUS STATE IS LOST."
+            )
             return self._fresh(memory_cls)
+
+    @staticmethod
+    def _validate_pickle_path(path: str) -> None:
+        """Reject unsafe pickle paths before pickle.load (SEC-005)."""
+        if os.path.islink(path):
+            raise ValueError(f"Refusing to load pickle via symlink: {path}")
+        if not os.path.isfile(path):
+            raise ValueError(f"Pickle path is not a regular file: {path}")
+        st = os.stat(path)
+        if hasattr(os, "getuid") and st.st_uid != os.getuid():
+            raise ValueError(
+                f"Pickle file owner uid {st.st_uid} != current uid {os.getuid()}"
+            )
+        if st.st_size > _PICKLE_MAX_BYTES:
+            raise ValueError(
+                f"Pickle file too large ({st.st_size} bytes > {_PICKLE_MAX_BYTES})"
+            )
 
     @staticmethod
     def _upgrade_schema(data: dict, from_ver: int) -> dict:
@@ -433,6 +491,61 @@ class SingleInstanceLock:
 # SessionStore — persists ATProto session to avoid repeated logins
 # ---------------------------------------------------------------------------
 
+@contextmanager
+def _best_effort_exclusive_lock(lock_path: str) -> Generator[None, None, None]:
+    """Exclusive lock: threading.RLock + msvcrt (Windows) / fcntl (POSIX).
+
+    Sidecar ``*.lock`` coordinates processes; RLock serializes threads first
+    (needed because ``msvcrt.locking`` is process-wide). Always yields —
+    OS lock failure is non-fatal (log once, continue with atomic I/O).
+    """
+    global _SESSION_LOCK_WARNED
+    with _session_thread_lock(lock_path):
+        fh = None
+        locked = False
+        try:
+            try:
+                fh = open(lock_path, 'a+b')
+                if os.name == 'nt':
+                    import msvcrt
+                    fh.seek(0, os.SEEK_END)
+                    if fh.tell() == 0:
+                        fh.write(b'\0')
+                        fh.flush()
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                locked = True
+            except Exception as e:
+                if not _SESSION_LOCK_WARNED:
+                    _SESSION_LOCK_WARNED = True
+                    logger.warning(
+                        "SessionStore file lock unavailable (%s); "
+                        "continuing without exclusive lock",
+                        e,
+                    )
+            yield
+        finally:
+            if fh is not None:
+                if locked:
+                    try:
+                        if os.name == 'nt':
+                            import msvcrt
+                            fh.seek(0)
+                            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                        else:
+                            import fcntl
+                            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                    except Exception:
+                        pass
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+
+
 class SessionStore:
     """Atomic JSON persistence for ATProto client session string.
 
@@ -440,47 +553,64 @@ class SessionStore:
     ``AsyncClient()`` with a session-string constructor.  We save that
     opaque string and restore it on next startup so the bot doesn't
     call ``login()`` every time, which is rate-limited (30/5 min).
+
+    save/load/clear take a best-effort exclusive sidecar lock
+    (``<path>.lock``) for cross-process safety; atomic temp+move and
+    chmod 0o600 are preserved regardless of lock success.
     """
 
     def __init__(self, path: str = 'session.json', max_age_hours: int = 23):
         self.path = path
         self.max_age = timedelta(hours=max_age_hours)
+        self._lock_path = f'{path}.lock'
 
     def save(self, session_string: str) -> None:
-        dir_name = _atomic_tmp_dir(self.path)
-        fd, tmp = tempfile.mkstemp(dir=dir_name, suffix='.tmp')
-        try:
-            with os.fdopen(fd, 'w', encoding='utf-8') as f:
-                json.dump({
-                    'session': session_string,
-                    'saved_at': datetime.now().isoformat(),
-                }, f)
-            shutil.move(tmp, self.path)
-        except Exception as e:
-            logger.warning(f"SessionStore save failed: {e}")
-            if os.path.exists(tmp):
-                os.unlink(tmp)
+        with _best_effort_exclusive_lock(self._lock_path):
+            dir_name = _atomic_tmp_dir(self.path)
+            fd, tmp = tempfile.mkstemp(dir=dir_name, suffix='.tmp')
+            try:
+                with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                    json.dump({
+                        'session': session_string,
+                        'saved_at': datetime.now().isoformat(),
+                    }, f)
+                # Restrict perms before move so the file is never world-readable.
+                try:
+                    os.chmod(tmp, 0o600)
+                except OSError:
+                    pass  # best-effort on Windows / non-POSIX FS
+                shutil.move(tmp, self.path)
+                try:
+                    os.chmod(self.path, 0o600)
+                except OSError:
+                    pass  # best-effort on Windows / non-POSIX FS
+            except Exception as e:
+                logger.warning(f"SessionStore save failed: {e}")
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
 
     def load(self) -> Optional[str]:
-        if not os.path.exists(self.path):
-            return None
-        try:
-            with open(self.path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            saved_at = datetime.fromisoformat(data['saved_at'])
-            if datetime.now() - saved_at > self.max_age:
-                logger.info("Persisted session expired — will login fresh.")
+        with _best_effort_exclusive_lock(self._lock_path):
+            if not os.path.exists(self.path):
                 return None
-            return data['session']
-        except Exception as e:
-            logger.warning(f"SessionStore load failed: {e}")
-            return None
+            try:
+                with open(self.path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                saved_at = datetime.fromisoformat(data['saved_at'])
+                if datetime.now() - saved_at > self.max_age:
+                    logger.info("Persisted session expired — will login fresh.")
+                    return None
+                return data['session']
+            except Exception as e:
+                logger.warning(f"SessionStore load failed: {e}")
+                return None
 
     def clear(self) -> None:
-        try:
-            os.remove(self.path)
-        except OSError:
-            pass
+        with _best_effort_exclusive_lock(self._lock_path):
+            try:
+                os.remove(self.path)
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------

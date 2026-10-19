@@ -20,6 +20,7 @@ import json
 import logging
 
 from bluesky_post_formatter import BlueskyPostFormatter, RichTextPost
+from url_safety import UnsafeURLError, validate_outbound_url
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +166,11 @@ class BlueskyRichPostCreator:
     async def fetch_link_metadata(self, url: str) -> Optional[LinkCard]:
         """Автоматически извлекает метаданные из URL"""
         try:
+            url = validate_outbound_url(url)
+        except UnsafeURLError as e:
+            logger.warning(f"⚠️ Unsafe URL rejected for link metadata: {e}")
+            return None
+        try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=10) as response:
                     if response.status != 200:
@@ -187,12 +193,15 @@ class BlueskyRichPostCreator:
                         image_url = og_image_match.group(1)
                         # Загружаем изображение
                         try:
+                            image_url = validate_outbound_url(image_url)
                             async with session.get(image_url, timeout=5) as img_response:
                                 if img_response.status == 200:
                                     img_data = await img_response.read()
                                     mime_type = img_response.headers.get('Content-Type', 'image/jpeg')
                                     thumbnail = ImageData(data=img_data, mime_type=mime_type)
-                        except:
+                        except UnsafeURLError:
+                            pass
+                        except Exception:
                             pass
                     
                     return LinkCard(
@@ -233,6 +242,7 @@ class BlueskyRichPostCreator:
         async with aiohttp.ClientSession() as session:
             for i, url in enumerate(image_urls[:4]):
                 try:
+                    url = validate_outbound_url(url)
                     async with session.get(url, timeout=10) as response:
                         if response.status == 200:
                             data = await response.read()
@@ -244,6 +254,8 @@ class BlueskyRichPostCreator:
                                 mime_type=mime_type,
                                 alt_text=alt_text
                             ))
+                except UnsafeURLError as e:
+                    logger.warning(f"⚠️ Unsafe image URL rejected: {e}")
                 except Exception as e:
                     logger.error(f"❌ Ошибка загрузки изображения {url}: {e}")
         

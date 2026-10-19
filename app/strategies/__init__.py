@@ -2,7 +2,7 @@
 """Post-creation strategy package — ADR-001 / STRAT-001+.
 
 Extracted strategy families live here (news/RSS, image/theme helpers,
-dynamic, theme, poll, insight/prediction, viral/trending).
+dynamic, theme, poll, insight/prediction, viral/trending, soft-fail).
 The strategy *contract* remains ``post_strategies.PostStrategy``; this
 package supplies ports/deps and concrete ``PostStrategy`` impls.
 
@@ -15,10 +15,15 @@ from __future__ import annotations
 
 __all__ = [
     "AI_INSIGHT_STRATEGY_NAME",
+    "DuplicateFallbackHelper",
     "DynamicPostsPorts",
+    "EMERGENCY_STRATEGY_NAME",
+    "EmergencyUniqueStrategy",
     "ImagePostHelper",
     "ImagePostPorts",
     "LIST_STRATEGY_NAME",
+    "MOTIVATIONAL_STRATEGY_NAME",
+    "MotivationalMomentStrategy",
     "NewsStrategyPorts",
     "PERSONAL_INSIGHT_STRATEGY_NAME",
     "PERSONAL_OPINION_STRATEGY_NAME",
@@ -72,6 +77,13 @@ from .ports import (
     ViralPostsPorts,
 )
 from .quality_news import STRATEGY_NAME, QualityNewsStrategy
+from .soft_fail_posts import (
+    EMERGENCY_STRATEGY_NAME,
+    MOTIVATIONAL_STRATEGY_NAME,
+    DuplicateFallbackHelper,
+    EmergencyUniqueStrategy,
+    MotivationalMomentStrategy,
+)
 from .theme_posts import (
     AI_INSIGHT_STRATEGY_NAME,
     LIST_STRATEGY_NAME,

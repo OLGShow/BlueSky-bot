@@ -44,6 +44,7 @@ PYFILES=(
     bot_learning_module.py
     bot_monitor.py
     content_ports.py
+    content_publish_state.py
     content_service.py
     dynamic_content_system.py
     engagement_ports.py

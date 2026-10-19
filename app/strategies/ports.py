@@ -87,9 +87,26 @@ Stable registry / learning keys (do not rename):
 - ``_create_viral_hot_take``
 - ``_create_trending_commentary``
 
-Deferred (not in this ports surface): soft-fail helpers
-``_create_motivational_moment_post``, ``_create_emergency_unique_post``,
-``_create_fallback_post_for_duplicate`` (partially covered by ``FallbackPostPort``).
+===========================================================================
+Deps inventory: soft-fail helpers (SOFT-001)
+===========================================================================
+
+| Bot call / field (today)                              | Port / field here                 | Role |
+|-------------------------------------------------------|-----------------------------------|------|
+| ``generate_structured_post_content``                  | ``StructuredContentPort``         | Motivational / emergency LLM JSON |
+| ``_create_post_with_image_generation``                | ``ImagePostHelper`` / Theme ports | Image + formatter glue |
+| ``_is_duplicate_content``                             | ``DuplicateContentPort``          | Fallback chain uniqueness |
+| ``_create_emergency_unique_post``                     | ``FallbackPostPort``              | Terminal emergency path |
+| registry ``resolve`` / getattr                        | ``StrategyLookupPort``            | Fallback chain strategy pick |
+
+Stable names (do not rename):
+
+- ``_create_motivational_moment_post``
+- ``_create_emergency_unique_post``
+
+``_create_fallback_post_for_duplicate`` is a helper (not a weighted strategy key).
+
+STATE-001 (this orch): content dedup/publish façade — not heartbeat/cache sync.
 
 Import rules (ADR invariants):
 - This module must not import ``bluesky_bot_v2`` or application services.
@@ -551,3 +568,45 @@ class ViralPostsPorts:
     content: StructuredContentPort
     image: ImagePostPorts
     viral_prompts: ViralPromptsPort
+
+
+# --- Soft-fail / duplicate fallback (SOFT-001…003) ---
+
+
+@runtime_checkable
+class StrategyLookupPort(Protocol):
+    """Resolve a stable strategy key to an async zero-arg post creator."""
+
+    def lookup(self, name: str) -> Optional[Callable[[], Awaitable[Any]]]:
+        """Return awaitable factory, or ``None`` if unavailable."""
+        ...
+
+
+@dataclass
+class CallableStrategyLookup:
+    """Binds registry resolve + optional getattr-style fallback."""
+
+    _lookup: Callable[[str], Optional[Callable[[], Awaitable[Any]]]]
+
+    def lookup(self, name: str) -> Optional[Callable[[], Awaitable[Any]]]:
+        return self._lookup(name)
+
+
+@dataclass
+class SoftFailPorts:
+    """Dependencies for motivational / emergency soft-fail strategies.
+
+    Reuses theme structured + image path (ThemePostPorts shape).
+    """
+
+    content: StructuredContentPort
+    image: ImagePostPorts
+
+
+@dataclass
+class DuplicateFallbackPorts:
+    """Dependencies for duplicate-replacement fallback chain (SOFT-003)."""
+
+    lookup: StrategyLookupPort
+    duplicates: DuplicateContentPort
+    emergency: FallbackPostPort

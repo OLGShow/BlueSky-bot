@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Added
+- Soft-fail strategies + duplicate fallback (`soft_fail_posts.py`, SOFT-001…004) + content dedup façade (`content_publish_state.py`, STATE-001)
+- Hermetic suites: `test_soft_fail_soft002`, `test_content_publish_state_state001` (SEC-001 retargeted to façade)
 - Viral/trending strategies (`viral_posts.py`, STRAT-009…011) + Phase 7 slices: `strategy_learning.py` (LEARN-001), `bot_cycle.BotCycleRunner` (CYCLE-001)
 - Hermetic suites: `test_viral_strategies_strat010`, `test_strategy_learning_learn001`, `test_bot_cycle_cycle001`
 - Strategy families extract — `ImagePostHelper` + dynamic / theme / poll / insight+prediction (`STRAT-004`…`008`); hybrid registry overwrite for remaining default-weight keys

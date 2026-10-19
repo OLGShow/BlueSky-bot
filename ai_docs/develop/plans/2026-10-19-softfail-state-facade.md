@@ -5,7 +5,7 @@
 **Parent / follow-up:** `ai_docs/develop/plans/2026-10-19-god-object-decomposition-followup.md`  
 **Prior cycle:** `orch-2026-10-19-17-51-viral-p7` (viral + LEARN + CYCLE; soft-fail + state façade deferred)  
 **ADR:** `ai_docs/develop/architecture/2026-10-19-layering-and-ports.md`  
-**Status:** ⏳ Ready  
+**Status:** ✅ Completed  
 **Goal:** Extract soft-fail post helpers into `app/strategies/` (ports + hybrid registry); then one focused Phase 7 state façade slice for content dedup / publish marking beyond existing `state_service`.  
 **Priority:** High  
 **Total Tasks:** 8  
@@ -82,14 +82,14 @@
 
 ## Progress (updated by orchestrator)
 
-- ⏳ SOFT-001: Inventory + soft-fail ports
-- ⏳ SOFT-002: Motivational + emergency extract
-- ⏳ SOFT-003: Fallback-for-duplicate helper
-- ⏳ SOFT-004: Registry wire + thin delegates
-- ⏳ TEST-001: Soft-fail hermetic tests
-- ⏳ STATE-001: Dedup/publish façade slice
-- ⏳ PKG-001: Packaging sync
-- ⏳ VERIFY-001: Verify gate + docs
+- ✅ SOFT-001: Inventory + soft-fail ports
+- ✅ SOFT-002: Motivational + emergency extract
+- ✅ SOFT-003: Fallback-for-duplicate helper
+- ✅ SOFT-004: Registry wire + thin delegates
+- ✅ TEST-001: Soft-fail hermetic tests
+- ✅ STATE-001: Dedup/publish façade slice
+- ✅ PKG-001: Packaging sync
+- ✅ VERIFY-001: Verify gate + docs (smoke 2/2; 281 OK / 3 skipped)
 
 ---
 

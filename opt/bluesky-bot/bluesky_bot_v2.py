@@ -126,17 +126,27 @@ from strategies.ports import (
     CallablePollFactory,
     CallablePostFactory,
     CallableRssHeadlines,
+    CallableStrategyLookup,
     CallableStructuredContent,
     CallableViralPrompts,
+    DuplicateFallbackPorts,
     DynamicPostsPorts,
     ImagePostPorts,
     LiveRssFeeds,
     NewsStrategyPorts,
     PollStrategyPorts,
+    SoftFailPorts,
     ThemePostPorts,
     ViralPostsPorts,
 )
 from strategies.quality_news import STRATEGY_NAME, QualityNewsStrategy
+from strategies.soft_fail_posts import (
+    EMERGENCY_STRATEGY_NAME,
+    MOTIVATIONAL_STRATEGY_NAME,
+    DuplicateFallbackHelper,
+    EmergencyUniqueStrategy,
+    MotivationalMomentStrategy,
+)
 from strategies.theme_posts import (
     AI_INSIGHT_STRATEGY_NAME,
     LIST_STRATEGY_NAME,
@@ -150,6 +160,7 @@ from strategies.viral_posts import (
     ViralHotTakeStrategy,
 )
 from bot_cycle import BotCycleRunner, CallableBotCyclePorts, TickResult
+from content_publish_state import ContentPublishState
 from strategy_learning import apply_strategy_weights_from_outcomes
 
 # Настройка логирования с абсолютным путем
@@ -595,6 +606,19 @@ class AutonomousBlueskyBotV2:
             image=self._image_post_ports,
         )
         self.theme_post_helper = ThemePostHelper(self._theme_post_ports)
+        # STATE-001: content dedup / publish façade
+        self.content_publish_state = ContentPublishState(self.memory)
+        # Soft-fail family (SOFT-002) before dynamic emergency wiring
+        self._soft_fail_ports = SoftFailPorts(
+            content=CallableStructuredContent(self.generate_structured_post_content),
+            image=self._image_post_ports,
+        )
+        self.motivational_moment_strategy = MotivationalMomentStrategy(
+            self._soft_fail_ports
+        )
+        self.emergency_unique_strategy = EmergencyUniqueStrategy(
+            self._soft_fail_ports
+        )
         # Theme family (STRAT-006): ai_insight + list via ThemePostHelper
         self.quality_ai_insight_strategy = QualityAiInsightStrategy(
             self.theme_post_helper
@@ -628,6 +652,10 @@ class AutonomousBlueskyBotV2:
         )
         # Hybrid registry: extracted strategies + bound methods for the rest.
         self.post_strategy_registry = self._build_post_strategy_registry()
+        # Soft-fail duplicate replacement chain (SOFT-003; needs registry)
+        self.duplicate_fallback_helper = DuplicateFallbackHelper(
+            self._build_duplicate_fallback_ports()
+        )
         # Phase 7: one-tick cycle runner (CYCLE-001)
         self.bot_cycle_runner = BotCycleRunner(self._build_bot_cycle_ports())
         if self.dry_run:
@@ -668,7 +696,25 @@ class AutonomousBlueskyBotV2:
                 self.dynamic_generator._generate_fallback_content,
             ),
             image=self._image_post_ports,
-            emergency=CallableFallbackPost(self._create_emergency_unique_post),
+            emergency=CallableFallbackPost(self.emergency_unique_strategy.create),
+        )
+
+    def _lookup_fallback_strategy(self, name: str):
+        """Registry resolve with getattr fallback (SOFT-003 / duplicate chain)."""
+        try:
+            return self.post_strategy_registry.resolve(name)
+        except StrategyLookupError:
+            fn = getattr(self, name, None)
+            if fn is None or not callable(fn):
+                return None
+            return fn
+
+    def _build_duplicate_fallback_ports(self) -> DuplicateFallbackPorts:
+        """Composition-root wiring for DuplicateFallbackHelper (SOFT-003)."""
+        return DuplicateFallbackPorts(
+            lookup=CallableStrategyLookup(self._lookup_fallback_strategy),
+            duplicates=CallableDuplicateContent(self._is_duplicate_content),
+            emergency=CallableFallbackPost(self.emergency_unique_strategy.create),
         )
 
     def _build_poll_strategy_ports(self) -> PollStrategyPorts:
@@ -785,7 +831,7 @@ class AutonomousBlueskyBotV2:
                 registered = list(registered) + [STRATEGY_NAME]
                 missing = [n for n in missing if n != STRATEGY_NAME]
 
-        # STRAT-005..010: dynamic / theme / poll / insight / prediction / viral.
+        # STRAT-005..010 + SOFT-002: dynamic / theme / poll / insight / viral / soft-fail.
         extracted_overwrites = (
             (PERSONAL_OPINION_STRATEGY_NAME, self.personal_opinion_strategy),
             (QUALITY_TIP_STRATEGY_NAME, self.quality_tip_strategy),
@@ -797,9 +843,15 @@ class AutonomousBlueskyBotV2:
             (PREDICTION_STRATEGY_NAME, self.prediction_strategy),
             (VIRAL_HOT_TAKE_STRATEGY_NAME, self.viral_hot_take_strategy),
             (TRENDING_COMMENTARY_STRATEGY_NAME, self.trending_commentary_strategy),
+            (MOTIVATIONAL_STRATEGY_NAME, self.motivational_moment_strategy),
+            (EMERGENCY_STRATEGY_NAME, self.emergency_unique_strategy),
         )
         for name, strategy in extracted_overwrites:
-            if name not in names:
+            # Soft-fail always registered for fallback resolve even if not weighted.
+            if name not in names and name not in (
+                MOTIVATIONAL_STRATEGY_NAME,
+                EMERGENCY_STRATEGY_NAME,
+            ):
                 continue
             registry.register(name, strategy, overwrite=True)
             if name not in registered:
@@ -1035,124 +1087,25 @@ class AutonomousBlueskyBotV2:
         return clean_text.strip()
     
     def _generate_content_hash(self, text: str, url: str = None, image_url: str = None) -> str:
-        """Генерирует хеш для контента чтобы избежать дубликатов"""
-        # Создаем строку из основных элементов контента
-        content_parts = [text.lower().strip()]
-        if url:
-            content_parts.append(url)
-        if image_url:
-            content_parts.append(image_url)
-        
-        content_string = "|".join(content_parts)
-        return hashlib.md5(content_string.encode('utf-8'), usedforsecurity=False).hexdigest()
-    
+        """Генерирует хеш контента (STATE-001 → ContentPublishState)."""
+        return self.content_publish_state.generate_content_hash(text, url, image_url)
+
     def _is_duplicate_content(self, text: str, url: str = None, image_url: str = None) -> bool:
-        """Проверяет, является ли контент дубликатом уже опубликованного"""
-        content_hash = self._generate_content_hash(text, url, image_url)
-        
-        # Проверяем хеш контента
-        if content_hash in self.memory.published_content_hashes:
-            logger.info(f"🔄 Найден дубликат по хешу контента: {content_hash[:8]}...")
-            return True
-        
-        # Проверяем URL отдельно (для новостей)
-        if url and url in self.memory.published_urls:
-            logger.info(f"🔄 Найден дубликат по URL: {url[:50]}...")
-            return True
-        
-        # Проверяем схожесть текста с недавними постами (последние 20)
-        recent_posts = self.memory.successful_posts[-20:] if self.memory.successful_posts else []
-        for post in recent_posts:
-            if 'text' in post:
-                similarity = self._calculate_text_similarity(text, post['text'])
-                if similarity > 0.8:  # 80% схожести
-                    logger.info(f"🔄 Найден дубликат по схожести текста: {similarity:.2f}")
-                    return True
-        
-        return False
-    
+        """Проверяет дубликат (STATE-001 → ContentPublishState)."""
+        return self.content_publish_state.is_duplicate(text, url, image_url)
+
     def _calculate_text_similarity(self, text1: str, text2: str) -> float:
-        """Простая оценка схожести текстов"""
-        # Убираем хештеги и эмодзи для сравнения
-        clean_text1 = re.sub(r'[#@][\w]+|[^\w\s]', '', text1.lower()).strip()
-        clean_text2 = re.sub(r'[#@][\w]+|[^\w\s]', '', text2.lower()).strip()
-        
-        if not clean_text1 or not clean_text2:
-            return 0.0
-        
-        # Разбиваем на слова
-        words1 = set(clean_text1.split())
-        words2 = set(clean_text2.split())
-        
-        if not words1 or not words2:
-            return 0.0
-        
-        # Коэффициент Жаккара (пересечение / объединение)
-        intersection = len(words1.intersection(words2))
-        union = len(words1.union(words2))
-        
-        return intersection / union if union > 0 else 0.0
-    
+        """Jaccard similarity (STATE-001 → ContentPublishState)."""
+        return self.content_publish_state.calculate_text_similarity(text1, text2)
+
     def _mark_content_as_published(self, text: str, url: str = None, image_url: str = None) -> None:
-        """Отмечает контент как опубликованный"""
-        content_hash = self._generate_content_hash(text, url, image_url)
-        self.memory.published_content_hashes.add(content_hash)
-        
-        if url:
-            self.memory.published_urls.add(url)
-        
-        # Ограничиваем размер множеств (храним последние 500 записей)
-        if len(self.memory.published_content_hashes) > 500:
-            # Преобразуем в список, удаляем первые 100, преобразуем обратно
-            hashes_list = list(self.memory.published_content_hashes)
-            self.memory.published_content_hashes = set(hashes_list[-400:])
-        
-        if len(self.memory.published_urls) > 500:
-            urls_list = list(self.memory.published_urls)
-            self.memory.published_urls = set(urls_list[-400:])
-        
-        logger.debug(f"📝 Контент отмечен как опубликованный: {content_hash[:8]}...")
-    
+        """Отмечает контент опубликованным (STATE-001 → ContentPublishState)."""
+        self.content_publish_state.mark_published(text, url, image_url)
+
     def _cleanup_old_content_hashes(self) -> None:
-        """Очищает старые хеши контента и применяет retention к спискам памяти."""
-        cutoff_date = datetime.now() - timedelta(days=30)
+        """Очищает хеши + retention списков (STATE-001 → ContentPublishState)."""
+        self.content_publish_state.cleanup_old_hashes()
 
-        recent_hashes = set()
-        recent_urls = set()
-
-        for post in self.memory.successful_posts:
-            if post.get('timestamp'):
-                try:
-                    post_date = datetime.fromisoformat(post['timestamp']) if isinstance(post['timestamp'], str) else post['timestamp']
-                    if post_date > cutoff_date:
-                        if 'content_hash' in post:
-                            recent_hashes.add(post['content_hash'])
-                        if 'url' in post:
-                            recent_urls.add(post['url'])
-                except Exception:
-                    pass
-
-        old_hash_count = len(self.memory.published_content_hashes)
-        old_url_count = len(self.memory.published_urls)
-        self.memory.published_content_hashes = recent_hashes
-        self.memory.published_urls = recent_urls
-        logger.info(f"🧹 Хеши: {old_hash_count}->{len(recent_hashes)}, URLs: {old_url_count}->{len(recent_urls)}")
-
-        # Retention: trim long-lived lists
-        retention_limits = {
-            'successful_posts': 500,
-            'failed_posts': 200,
-            'repost_performance': 200,
-            'viral_posts': 100,
-            'pattern_blacklist': 50,
-        }
-        for attr, limit in retention_limits.items():
-            lst = getattr(self.memory, attr, None)
-            if lst is not None and isinstance(lst, list) and len(lst) > limit:
-                old_len = len(lst)
-                setattr(self.memory, attr, lst[-limit:])
-                logger.info(f"🧹 Retention {attr}: {old_len}->{limit}")
-    
     def _cleanup_old_commented_posts(self) -> None:
         """Очищает старые записи о всех взаимодействиях (старше 7 дней)"""
         # Очищаем каждые 7 дней для предотвращения бесконечного роста
@@ -1237,130 +1190,16 @@ class AutonomousBlueskyBotV2:
         }
     
     async def _create_fallback_post_for_duplicate(self) -> Optional[RichTextPost]:
-        """Создает альтернативный пост когда основной оказался дубликатом"""
-        logger.info("🎭 Создание fallback поста для замены дубликата...")
-        
-        # Имена стратегий (learning keys) + display labels; resolve via registry.
-        # Unregistered names (not in post_strategies config) fall back to bound
-        # getattr — same callables as before STRAT-002.
-        fallback_strategies = [
-            ("_create_personal_opinion_post", "личное мнение"),
-            ("_create_quality_ai_insight", "AI инсайт"),
-            ("_create_quality_tip_post", "совет из опыта"),
-            ("_create_quality_discussion", "дискуссия"),
-            ("_create_motivational_moment_post", "мотивационный момент"),
-        ]
-        
-        # Пробуем каждую стратегию до получения уникального контента
-        for func_name, strategy_name in fallback_strategies:
-            try:
-                try:
-                    strategy_func = self.post_strategy_registry.resolve(func_name)
-                except StrategyLookupError:
-                    strategy_func = getattr(self, func_name, None)
-                    if strategy_func is None or not callable(strategy_func):
-                        logger.warning(
-                            "⚠️ Fallback стратегия '%s' (%s) недоступна — пропускаем",
-                            strategy_name,
-                            func_name,
-                        )
-                        continue
-                logger.info(f"🔄 Пробуем стратегию: {strategy_name}")
-                post = await strategy_func()
-                
-                if post:
-                    # Проверяем уникальность
-                    url = getattr(post, 'url', None) if hasattr(post, 'url') else None
-                    image_url = getattr(post, 'image_url', None) if hasattr(post, 'image_url') else None
-                    
-                    if not self._is_duplicate_content(post.text, url, image_url):
-                        logger.info(f"✅ Успешно создан fallback пост: {strategy_name}")
-                        return post
-                    else:
-                        logger.info(f"🔄 Fallback стратегия '{strategy_name}' тоже дубликат, пробуем следующую")
-                        
-            except Exception as e:
-                logger.warning(f"⚠️ Ошибка в fallback стратегии '{strategy_name}': {e}")
-                continue
-        
-        # Если все стратегии не сработали, создаем экстренный пост
-        logger.warning("⚠️ Все fallback стратегии не сработали, создаем экстренный пост")
-        return await self._create_emergency_unique_post()
-    
+        """Fallback when primary post is duplicate (SOFT-003)."""
+        return await self.duplicate_fallback_helper.create()
+
     async def _create_motivational_moment_post(self) -> RichTextPost:
-        """Создает мотивационный пост с динамическими хештегами и изображением"""
-        motivation_themes = [
-            "преодоление трудностей", 
-            "достижение целей",
-            "личностный рост",
-            "начинания и проекты",
-            "прогресс и развитие"
-        ]
-        selected_theme = random.choice(motivation_themes)
+        """Motivational soft-fail (delegates to MotivationalMomentStrategy / SOFT-002)."""
+        return await self.motivational_moment_strategy.create()
 
-        async def content_creator():
-            ai_prompt = f"""
-            Create an inspiring, non-cliche motivational post about "{selected_theme}".
-            Provide the output in JSON format with "post_text" (in English, 150-200 characters, fresh and engaging) and "hashtags" (in English, 3 relevant tags).
-
-            Example for "achieving goals":
-            {{
-              "post_text": "Цель не в том, чтобы никогда не падать, а в том, чтобы каждый раз находить новый способ подняться. Какой ваш следующий подъем? 🚀",
-              "hashtags": "#мотивация #цели #рост #упорство"
-            }}
-            """
-            return await self.generate_structured_post_content(ai_prompt, model_key='creative')
-
-        async def fallback_creator():
-            current_time = datetime.now().strftime("%H:%M")
-            return {
-                "post_text": f"💭 Thought of the day ({current_time}):\n\nWhat motivates you to move forward right now?",
-                "hashtags": "#motivation #thoughts #development"
-            }
-
-        return await self._create_post_with_image_generation(
-            content_creator,
-            selected_theme,
-            'motivational',
-            fallback_creator
-        )
-    
     async def _create_emergency_unique_post(self) -> RichTextPost:
-        """Создает экстренный пост с динамическими хештегами и изображением"""
-        emergency_themes = [
-            "момент рефлексии",
-            "случайная мысль",
-            "настроение дня",
-            "простое наблюдение"
-        ]
-        selected_theme = random.choice(emergency_themes)
-
-        async def content_creator():
-            ai_prompt = f"""
-            Create a short, spontaneous post about "{selected_theme}".
-            Provide the output in JSON format with "post_text" (in English, 120-180 characters, simple and human-like) and "hashtags" (in English, 2-3 relevant tags).
-
-            Example for "random thought":
-            {{
-              "post_text": "Иногда самые простые моменты приносят больше всего радости. Замечали? ✨",
-              "hashtags": "#момент #жизнь #мысли"
-            }}
-            """
-            return await self.generate_structured_post_content(ai_prompt, model_key='fast')
-
-        async def fallback_creator():
-            timestamp = datetime.now().strftime('%d.%m %H:%M:%S')
-            return {
-                "post_text": f"💭 Random thought of the moment:\n\nWhat's on your mind right now? ({timestamp})",
-                "hashtags": "#moment #thoughts"
-            }
-
-        return await self._create_post_with_image_generation(
-            content_creator,
-            selected_theme,
-            'emergency',
-            fallback_creator
-        )
+        """Emergency unique soft-fail (delegates to EmergencyUniqueStrategy / SOFT-002)."""
+        return await self.emergency_unique_strategy.create()
 
     async def authenticate(self, force_login: bool = False) -> bool:
         """Session-first auth: restore persisted session, fallback to login.

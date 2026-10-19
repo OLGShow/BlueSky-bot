@@ -4,7 +4,7 @@
 **Parent orchestration:** orch-2026-10-19-14-33-layout-godobj  
 **Parent plan:** `ai_docs/develop/plans/2026-10-19-layout-and-god-object-prep.md`  
 **ADR:** `ai_docs/develop/architecture/2026-10-19-layering-and-ports.md`  
-**Status:** 🟡 In progress (Phases 2–7 advanced; soft-fail helpers + remaining state façade deferred)  
+**Status:** 🟡 Near complete (Phases 2–7 done; heartbeat / engagement cache / timeline deferred)  
 **Goal:** Complete DIP / OCP decomposition of `AutonomousBlueskyBotV2` beyond Phase 1  
   (Engagement ports + strategy registry skeleton).  
 **Priority:** High  
@@ -16,11 +16,11 @@
 | **Phase 2** — ContentService ports | ✅ Done | `orch-2026-10-19-15-06-godobj-p2` — report: [god-object-phase2-content-strategies-implementation.md](../reports/2026-10-19-god-object-phase2-content-strategies-implementation.md) |
 | **Phase 3** — registry register + dispatch | ✅ Done | Same orch — full keys via `build_bound_registry`; `create_scheduled_post` → `weighted_entries` / `resolve` |
 | **Phase 3** — news-family extract (`STRAT-003`) | ✅ Done | `orch-2026-10-19-17-06-strat003-io` — `app/strategies/quality_news.py` + hybrid registry |
-| **Phase 3** — strategy families + viral | ✅ Done (soft-fail deferred) | `orch-2026-10-19-17-34-strat-families` + `orch-2026-10-19-17-51-viral-p7` — viral/trending extracted; **soft-fail helpers still deferred** |
+| **Phase 3** — strategy families + viral + soft-fail | ✅ Done | Through `orch-2026-10-19-18-33-softfail-state` — motivational / emergency / duplicate fallback extracted |
 | **Phase 4** — RetryPolicy | ✅ Done (AI+RSS+ATProto/media) | Prior orch AI/RSS; `orch-2026-10-19-17-34-strat-families` — ATProto + media upload via RetryPolicy |
 | **Phase 5** — quality pipeline | ✅ On scheduled post | `orch-2026-10-19-17-06-strat003-io` — `QualityPipeline` / `regenerate_until_quality` on `create_scheduled_post` |
 | **Phase 6** — shared HTTP | ✅ Done | AI adapters + formatter / rich_posts shared session (`HTTP-002`) |
-| **Phase 7** — LEARN + CYCLE | ✅ Partial | `orch-2026-10-19-17-51-viral-p7` — `strategy_learning.py` + `bot_cycle.BotCycleRunner.tick`; **state façade leftover deferred** |
+| **Phase 7** — LEARN + CYCLE + dedup state | ✅ Partial | LEARN/CYCLE + `ContentPublishState`; **heartbeat / cache sync / engagement timeline deferred** |
 
 ---
 
@@ -43,13 +43,13 @@ Bot remains composition root until slices are small enough to drop.
 | Phase | Name | Est. | Status |
 |-------|------|------|--------|
 | **2** | ContentService ports + wiring | 3–4h | ✅ Done (`orch-2026-10-19-15-06-godobj-p2`) |
-| **3** | Full post strategy extraction | 4–6h | ✅ Families + viral (`orch-…-17-34` + `orch-…-17-51`); **soft-fail leftovers deferred** |
+| **3** | Full post strategy extraction | 4–6h | ✅ Families + viral + soft-fail (`orch-…-17-34` … `orch-…-18-33`) |
 | **4** | RetryPolicy on outbound I/O | 2–3h | ✅ Done — AI+RSS + ATProto/media (`orch-2026-10-19-17-34-strat-families`) |
 | **5** | Unified quality pipeline | 3–4h | ✅ Scheduled-post path (`orch-2026-10-19-17-06-strat003-io`) |
 | **6** | Shared HTTP `ClientSession` injection | 2h | ✅ Done — AI + formatter/rich_posts (`HTTP-002`) |
-| **7** | Further bot slices (state / schedule / learning) | ongoing | ✅ LEARN + CYCLE done; **state façade deferred** |
+| **7** | Further bot slices (state / schedule / learning) | ongoing | ✅ LEARN + CYCLE + dedup façade; **heartbeat/cache deferred** |
 
-Suggested next orchestration: **soft-fail strategy leftovers** and/or **remaining state façade**, ≤10 tasks, same verify gate.
+Suggested next orchestration: **heartbeat file I/O** and/or **engagement cache ↔ memory sync**, ≤10 tasks, same verify gate.
 
 ---
 
@@ -74,7 +74,7 @@ Suggested next orchestration: **soft-fail strategy leftovers** and/or **remainin
 
 ## Phase 3 — Full strategy extraction
 
-**Status:** ✅ Families + viral extracted; **soft-fail helpers deferred**
+**Status:** ✅ Families + viral + soft-fail extracted
 
 **Problem:** `create_scheduled_post` built strategies via `hasattr` / `getattr`; registry was proof-only.
 
@@ -102,14 +102,17 @@ Suggested next orchestration: **soft-fail strategy leftovers** and/or **remainin
 - Hybrid registry overwrite for `_create_viral_hot_take` / `_create_trending_commentary`
 - VERIFY-001: smoke 2/2; unittest 264 OK (3 skipped)
 
-**Explicitly deferred (next extract cycle):**
-- Soft-fail helpers: `_create_motivational_moment_post`, `_create_emergency_unique_post`, `_create_fallback_post_for_duplicate`
+**Done (`orch-2026-10-19-18-33-softfail-state` — soft-fail):**
+- `MotivationalMomentStrategy` + `EmergencyUniqueStrategy` + `DuplicateFallbackHelper` (`soft_fail_posts.py`)
+- Hybrid registry always registers motivational/emergency for fallback resolve
+- VERIFY: smoke 2/2; unittest 281 OK (3 skipped)
+
+**Explicitly deferred:** none for Phase 3 strategy extract (soft-fail complete).
 
 **Acceptance:**
 - ✅ Runtime dispatch via registry (weights, quality gate regen, duplicates equivalent)
 - ✅ `post_strategies.py` remains free of bot imports
-- ✅ News + dynamic + theme + poll + insight/prediction + viral/trending = extracted strategies
-- ⬜ Soft-fail kinds still bound methods (interim) until next extract cycle
+- ✅ News + dynamic + theme + poll + insight/prediction + viral/trending + soft-fail = extracted
 
 **How to use the registry (current + target extract):**
 
@@ -191,17 +194,18 @@ post = await strategy_fn()
 
 ## Phase 7 — Further bot slices (backlog)
 
-**Status:** ✅ LEARN + CYCLE done (`orch-2026-10-19-17-51-viral-p7`); remaining backlog below
+**Status:** ✅ LEARN + CYCLE + dedup façade done; remaining backlog below
 
 **Done:**
 - Learning weight updates → `app/strategy_learning.py` (`apply_strategy_weights_from_outcomes`); bot thin delegate
 - Main-loop tick → `app/bot_cycle.py` (`BotCycleRunner.tick`); bot keeps `while True` + sleep/auth/budget logs
+- Content dedup/publish → `app/content_publish_state.py` (`ContentPublishState`); bot thin delegates (`orch-2026-10-19-18-33-softfail-state`)
 
 **Still deferred:**
-- State / persistence façade — finish remaining direct file/memory ops beyond `state_service`
+- Heartbeat file I/O → `state_service` / monitor helper
+- Engagement cache ↔ memory sync consolidation
 - Engagement timeline / smart engagement orchestration (above EngagementService)
 - Dry-run reporting aggregation
-- Soft-fail strategy helpers (listed under Phase 3)
 
 Each slice: ports → wire → tests → shrink bot LOC. Prefer ≤1 major slice per orchestration.
 

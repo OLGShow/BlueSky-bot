@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """
 ContentService — extracted content helpers to decouple orchestration.
+
+Depends only on ContentPorts (ADR-001 / CONT-003). Must not import
+bluesky_bot_v2; the bot remains the composition root that builds ports.
 """
 
 from __future__ import annotations
 
 import unicodedata
 from typing import List, Optional
+
+from content_ports import ContentPorts
 
 # Bluesky app.bsky.feed.post text limit (~300 Unicode grapheme clusters).
 BLUESKY_MAX_GRAPHEMES = 300
@@ -105,11 +110,11 @@ def validate_outbound_text(
 
 
 class ContentService:
-    def __init__(self, bot):
-        self.bot = bot
+    def __init__(self, ports: ContentPorts):
+        self._ports = ports
 
     def build_structured_prompt(self, prompt: str) -> str:
-        ab_suffix = getattr(self.bot, '_current_ab_suffix', '')
+        ab_suffix = self._ports.prompt.ab_suffix or ''
         if ab_suffix:
             prompt = prompt.rstrip() + ab_suffix
 
@@ -128,7 +133,7 @@ class ContentService:
             "Avoid generic filler like 'this changes everything' without evidence."
         )
 
-        if getattr(self.bot, '_quality_gate_regen_mode', False):
+        if self._ports.prompt.quality_gate_regen_mode:
             prompt = prompt + (
                 '\n\nIMPORTANT: The previous attempt was rejected for being too generic or repetitive. '
                 'Make this post highly specific: include at least one concrete number, fact, or named example. '
@@ -139,8 +144,9 @@ class ContentService:
         return prompt
 
     def schedule_post_performance_checks(self, uri: str) -> None:
+        sched = self._ports.scheduler
         for delay in (3600, 21600, 86400):
-            self.bot._spawn_background(self.bot.delayed_performance_check(uri, delay))
+            sched.spawn(sched.delayed_performance_check(uri, delay))
 
     def prepare_outbound_text(
         self,

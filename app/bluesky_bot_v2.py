@@ -51,7 +51,24 @@ from resilience_service import (
     CircuitBreaker, RetryPolicy, ErrorClass, classify_error, backoff_seconds,
 )
 from log_sanitizer import SanitizingFilter
+from engagement_ports import (
+    DryRunGate,
+    EngagementPorts,
+    LiveEngagementConfig,
+    LiveEngagementIdentity,
+    UnlimitedBudget,
+)
 from engagement_service import EngagementService
+from content_ports import (
+    ContentPorts,
+    LiveBackgroundScheduler,
+    LivePromptContext,
+)
+from post_strategies import (
+    PostStrategyRegistry,
+    StrategyLookupError,
+    build_bound_registry,
+)
 from content_service import (
     ContentService,
     OutboundContentError,
@@ -423,8 +440,6 @@ class AutonomousBlueskyBotV2:
 
         # Action ledger for idempotency
         self.action_ledger = ActionLedger()
-        self.engagement_service = EngagementService(self)
-        self.content_service = ContentService(self)
 
         # Activity budget (ATProto write-point caps)
         budget_cfg = self.config.get('activity_budget', {})
@@ -460,13 +475,81 @@ class AutonomousBlueskyBotV2:
         self.repost_policy = RepostPolicyFilter(self.config)
         self.rss_manager = RSSSourceManager(self.config, self.http_session)
         self.recent_repost_authors: List[str] = []
+        # Content + engagement ports after AB flags / ledger / dry-run exist
+        self.content_service = ContentService(self._build_content_ports())
+        self.engagement_service = EngagementService(self._build_engagement_ports())
+        # Strategy registry: all post_strategies config keys; dispatch via registry.
+        self.post_strategy_registry = self._build_post_strategy_registry()
         if self.dry_run:
             logger.info("🧪 DRY-RUN режим: никакие действия не будут выполнены")
 
         # Система мониторинга активности (heartbeat)
         self.last_heartbeat = datetime.now()
         self.heartbeat_file = 'bot_heartbeat.txt'
-    
+
+    def _build_content_ports(self) -> ContentPorts:
+        """Composition-root wiring: bot attrs → ContentPorts (no service→bot)."""
+        return ContentPorts(
+            prompt=LivePromptContext(
+                _get_ab_suffix=lambda: getattr(self, '_current_ab_suffix', '') or '',
+                _get_quality_gate_regen_mode=lambda: bool(
+                    getattr(self, '_quality_gate_regen_mode', False)
+                ),
+            ),
+            scheduler=LiveBackgroundScheduler(
+                _spawn=self._spawn_background,
+                _delayed_performance_check=self.delayed_performance_check,
+            ),
+        )
+
+    def _build_post_strategy_registry(self) -> PostStrategyRegistry:
+        """Composition-root: register all ``post_strategies`` config keys.
+
+        Interim: bound methods via ``getattr`` (ADR-allowed). Runtime dispatch
+        uses ``registry.weighted_entries`` / ``resolve`` in
+        ``create_scheduled_post`` and duplicate-fallback loops.
+        """
+        names = list(self.config.get("post_strategies", {}).keys())
+        registry, registered, missing = build_bound_registry(self, names)
+        if missing:
+            logger.warning(
+                "PostStrategyRegistry: missing bound methods for config keys: %s",
+                ", ".join(missing),
+            )
+        if names and not registered:
+            logger.error(
+                "PostStrategyRegistry: empty — 0/%d config keys resolved to callables",
+                len(names),
+            )
+        else:
+            logger.info(
+                "PostStrategyRegistry: registered %d/%d strategies from post_strategies config",
+                len(registered),
+                len(names),
+            )
+        return registry
+
+    def _build_engagement_ports(self) -> EngagementPorts:
+        """Composition-root wiring: bot attrs → EngagementPorts (no service→bot)."""
+        budget = getattr(self, 'activity_budget', None)
+        return EngagementPorts(
+            client=self.bluesky_client,
+            ledger=self.action_ledger,
+            budget=budget if budget is not None else UnlimitedBudget(),
+            dry_run=DryRunGate(
+                enabled=bool(getattr(self, 'dry_run', False)),
+                _logger=getattr(self, 'dry_run_log', None),
+            ),
+            stats=self.session_stats,
+            identity=LiveEngagementIdentity(
+                _liked_posts=lambda: self.liked_posts,
+                _reposted_posts=lambda: self.reposted_posts,
+                _followed_users=lambda: self.followed_users,
+                _recent_repost_authors=lambda: self.recent_repost_authors,
+            ),
+            config=LiveEngagementConfig(_get_config=lambda: self.config),
+        )
+
     def load_external_config(self, config_file='bot_config.json'):
         """Загружает внешнюю конфигурацию, чтобы ее можно было изменять."""
         try:
@@ -815,18 +898,31 @@ class AutonomousBlueskyBotV2:
         """Создает альтернативный пост когда основной оказался дубликатом"""
         logger.info("🎭 Создание fallback поста для замены дубликата...")
         
-        # Приоритетный список альтернативных стратегий (избегаем новости)
+        # Имена стратегий (learning keys) + display labels; resolve via registry.
+        # Unregistered names (not in post_strategies config) fall back to bound
+        # getattr — same callables as before STRAT-002.
         fallback_strategies = [
-            (self._create_personal_opinion_post, "личное мнение"),
-            (self._create_quality_ai_insight, "AI инсайт"),
-            (self._create_quality_tip_post, "совет из опыта"),
-            (self._create_quality_discussion, "дискуссия"),
-            (self._create_motivational_moment_post, "мотивационный момент")
+            ("_create_personal_opinion_post", "личное мнение"),
+            ("_create_quality_ai_insight", "AI инсайт"),
+            ("_create_quality_tip_post", "совет из опыта"),
+            ("_create_quality_discussion", "дискуссия"),
+            ("_create_motivational_moment_post", "мотивационный момент"),
         ]
         
         # Пробуем каждую стратегию до получения уникального контента
-        for strategy_func, strategy_name in fallback_strategies:
+        for func_name, strategy_name in fallback_strategies:
             try:
+                try:
+                    strategy_func = self.post_strategy_registry.resolve(func_name)
+                except StrategyLookupError:
+                    strategy_func = getattr(self, func_name, None)
+                    if strategy_func is None or not callable(strategy_func):
+                        logger.warning(
+                            "⚠️ Fallback стратегия '%s' (%s) недоступна — пропускаем",
+                            strategy_name,
+                            func_name,
+                        )
+                        continue
                 logger.info(f"🔄 Пробуем стратегию: {strategy_name}")
                 post = await strategy_func()
                 
@@ -998,13 +1094,12 @@ class AutonomousBlueskyBotV2:
             # НИКОГДА НЕ СОЗДАЕМ THREAD АВТОМАТИЧЕСКИ
             logger.info("🎨 Создание качественного поста...")
             
-            # Получаем стратегии и веса из ЗАГРУЖЕННОЙ конфигурации
+            # Стратегии и веса через PostStrategyRegistry (config keys = learning names)
             strategies_config = self.config.get('post_strategies', {})
-            strategies = []
-            for func_name, weight in strategies_config.items():
-                if hasattr(self, func_name):
-                    strategies.append((getattr(self, func_name), weight))
-            
+            strategies = self.post_strategy_registry.weighted_entries(
+                strategies_config,
+                skip_missing=True,  # match prior hasattr skip; empty → error below
+            )
             if not strategies:
                 logger.error("❌ Не найдено ни одной валидной стратегии в конфигурации!")
                 return

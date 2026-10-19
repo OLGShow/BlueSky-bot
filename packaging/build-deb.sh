@@ -42,10 +42,13 @@ PYFILES=(
     bluesky_rich_posts.py
     bot_learning_module.py
     bot_monitor.py
+    content_ports.py
     content_service.py
     dynamic_content_system.py
+    engagement_ports.py
     engagement_service.py
     growth_engine.py
+    post_strategies.py
     http_session.py
     log_sanitizer.py
     openrouter_adapter.py
@@ -69,46 +72,11 @@ cp "$REPO_ROOT/bot_config.json"   "$STAGE/opt/bluesky-bot/"
 cp "$REPO_ROOT/env.example" "$STAGE/etc/bluesky-bot/.env"
 cp "$REPO_ROOT/bot_config.json" "$STAGE/etc/bluesky-bot/bot_config.json"
 
-# --- systemd unit (patched for package paths) ---
-cat > "$STAGE/etc/systemd/system/bluesky-bot.service" << 'UNIT'
-[Unit]
-Description=BlueSky Bot - Autonomous AI Social Media Bot
-Documentation=https://github.com/OLGShow/BlueSky-bot
-After=network.target network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=bluesky-bot
-Group=bluesky-bot
-WorkingDirectory=/opt/bluesky-bot
-EnvironmentFile=/etc/bluesky-bot/.env
-
-ExecStart=/opt/bluesky-bot/venv/bin/python /opt/bluesky-bot/bluesky_bot_v2.py
-
-Restart=always
-RestartSec=10
-StartLimitBurst=5
-StartLimitInterval=60
-
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=bluesky-bot
-
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/opt/bluesky-bot /var/lib/bluesky-bot /etc/bluesky-bot
-MemoryMax=512M
-
-KillMode=mixed
-KillSignal=SIGTERM
-TimeoutStopSec=30
-
-[Install]
-WantedBy=multi-user.target
-UNIT
+# --- systemd unit ---
+# SoT: systemd/bluesky-bot.service
+# etc/systemd/system/bluesky-bot.service is a synced copy for repo layout reference.
+UNIT_SOT="$REPO_ROOT/systemd/bluesky-bot.service"
+cp "$UNIT_SOT" "$STAGE/etc/systemd/system/bluesky-bot.service"
 
 # --- Build ---
 DEB_FILE="$DIST/${PKG}_${VERSION}_all.deb"

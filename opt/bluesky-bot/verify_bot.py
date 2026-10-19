@@ -416,19 +416,59 @@ def test_activity_budget():
 
 @test("EngagementService: mode guard (open, whitelist, mention_only)")
 def test_engagement_mode_guard():
+    from engagement_ports import (
+        DryRunGate,
+        EngagementConfigView,
+        EngagementIdentityView,
+        EngagementPorts,
+        UnlimitedBudget,
+    )
     from engagement_service import EngagementService
 
-    class FakeBot:
-        config = {'engagement_mode': 'open', 'engagement_whitelist': []}
+    class _FakeLedger:
+        def contains(self, key: str) -> bool:
+            return False
 
-    svc = EngagementService(FakeBot())
+        def record(self, key: str) -> None:
+            return None
+
+    class _FakeClient:
+        async def like(self, uri: str, cid: str):
+            return None
+
+        async def repost(self, uri: str, cid: str):
+            return None
+
+        async def follow(self, did: str):
+            return None
+
+    def make_svc(mode: str, whitelist=None):
+        ports = EngagementPorts(
+            client=_FakeClient(),
+            ledger=_FakeLedger(),
+            budget=UnlimitedBudget(),
+            dry_run=DryRunGate(enabled=False),
+            stats={'likes_given': 0, 'reposts_made': 0, 'follows_made': 0},
+            identity=EngagementIdentityView(
+                liked_posts=set(),
+                reposted_posts=set(),
+                followed_users=set(),
+                recent_repost_authors=[],
+            ),
+            config=EngagementConfigView(
+                mode=mode,
+                whitelist=frozenset(whitelist or []),
+            ),
+        )
+        return EngagementService(ports)
+
+    svc = make_svc('open')
     assert svc._engagement_allowed('did:123', '@user') is True
 
-    FakeBot.config['engagement_mode'] = 'mention_only'
+    svc = make_svc('mention_only')
     assert svc._engagement_allowed('did:123', '@user') is False
 
-    FakeBot.config['engagement_mode'] = 'whitelist_only'
-    FakeBot.config['engagement_whitelist'] = ['did:abc']
+    svc = make_svc('whitelist_only', ['did:abc'])
     assert svc._engagement_allowed('did:abc') is True
     assert svc._engagement_allowed('did:xyz') is False
 

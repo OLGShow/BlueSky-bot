@@ -113,9 +113,24 @@ class TestOutboundValidationVal001(unittest.TestCase):
         self.assertEqual(len(split_graphemes(text)), BLUESKY_MAX_GRAPHEMES)
 
     def test_prepare_via_content_service_delegate(self):
+        from content_ports import ContentPorts, PromptContextView
         from content_service import ContentService
 
-        svc = ContentService(bot=object())
+        class _NoopScheduler:
+            def spawn(self, coro):
+                pass
+
+            def delayed_performance_check(self, uri, delay):
+                async def _noop():
+                    return None
+
+                return _noop()
+
+        ports = ContentPorts(
+            prompt=PromptContextView(),
+            scheduler=_NoopScheduler(),
+        )
+        svc = ContentService(ports)
         self.assertEqual(svc.prepare_outbound_text("ok post"), "ok post")
         with self.assertRaises(OutboundContentError):
             svc.prepare_outbound_text("   ")

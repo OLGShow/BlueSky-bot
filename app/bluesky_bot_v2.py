@@ -18,6 +18,13 @@ import aiohttp
 import feedparser
 from atproto import AsyncClient, models
 from dynamic_content_system import BlueSkyTrendingTracker, DynamicContentGenerator
+from trends_engagement import (
+    CallableFeedPage as TrendsCallableFeedPage,
+    CallableRelevance as TrendsCallableRelevance,
+    TrendsEngagementConfig,
+    TrendsEngagementOrchestrator,
+    TrendsEngagementPorts,
+)
 import openai
 from openai import AsyncOpenAI
 from dataclasses import dataclass, asdict, field
@@ -568,8 +575,11 @@ class AutonomousBlueskyBotV2:
         self.max_posts_per_day = min(limits.get('max_posts_per_day', 10), 50)
         self.max_interactions_per_cycle = limits.get('max_interactions_per_cycle', 5)
 
-        # Инициализация системы трендов и динамической генерации контента
-        self.trending_tracker = BlueSkyTrendingTracker(self.bluesky_client)
+        # Official «Актуальные» (getTrends) — filter applies to trends only, not RSS
+        self.trending_tracker = BlueSkyTrendingTracker(
+            self.bluesky_client,
+            config=self.config.get("trends", {}),
+        )
         self.dynamic_generator = DynamicContentGenerator(self.trending_tracker)
         
         # НОВОЕ: Инициализация улучшенных AI компонентов
@@ -715,6 +725,9 @@ class AutonomousBlueskyBotV2:
         self.smart_engagement_orchestrator = SmartEngagementOrchestrator(
             self._build_smart_engagement_ports()
         )
+        self.trends_engagement_orchestrator = TrendsEngagementOrchestrator(
+            self._build_trends_engagement_ports()
+        )
         # Phase 7: daily report + dry-run flush (DRY-001)
         self.daily_reporting = DailyReportingFacade(
             _generate=generate_daily_report,
@@ -805,6 +818,40 @@ class AutonomousBlueskyBotV2:
             viral_prompts=CallableViralPrompts(
                 self.engagement_optimizer.generate_viral_post_prompts
             ),
+            pick_trending_theme=self.trending_tracker.pick_theme_for_posts,
+        )
+
+    def _build_trends_engagement_ports(self) -> TrendsEngagementPorts:
+        """Composition-root wiring for official trend-feed likes."""
+
+        async def _fetch_feed(feed_uri: str, *, limit: int = 5) -> Any:
+            client = self.bluesky_client
+            try:
+                return await client.app.bsky.feed.get_feed(
+                    {"feed": feed_uri, "limit": limit}
+                )
+            except TypeError:
+                return await client.app.bsky.feed.get_feed(
+                    feed=feed_uri, limit=limit
+                )
+            except Exception:
+                # Public AppView fallback (same feed URIs as sidebar «Актуальные»)
+                await self._ensure_http_session()
+                assert self.http_session is not None
+                url = self.trending_tracker.feed_url(feed_uri, limit=limit)
+                async with self.http_session.get(url) as resp:
+                    resp.raise_for_status()
+                    return await resp.json()
+
+        return TrendsEngagementPorts(
+            tracker=self.trending_tracker,
+            feed=TrendsCallableFeedPage(_fetch_feed),
+            relevance=TrendsCallableRelevance(self.calculate_relevance),
+            like=self.engagement_service.like,
+            get_my_did=lambda: getattr(
+                getattr(self.bluesky_client, "me", None), "did", None
+            ),
+            sleep=asyncio.sleep,
         )
 
     def _sync_duplicate_caches_to_memory(self) -> None:
@@ -1427,6 +1474,18 @@ class AutonomousBlueskyBotV2:
         rich = getattr(self, 'rich_creator', None)
         if rich is not None and hasattr(rich, 'set_http_session'):
             rich.set_http_session(self.http_session)
+        tracker = getattr(self, "trending_tracker", None)
+        if tracker is not None and hasattr(tracker, "set_fetch_json"):
+            tracker.set_fetch_json(self._trends_fetch_json)
+
+    async def _trends_fetch_json(self, url: str) -> Dict[str, Any]:
+        """HTTP JSON for getTrends / getFeed public AppView fallback."""
+        await self._ensure_http_session()
+        assert self.http_session is not None
+        async with self.http_session.get(url) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+            return data if isinstance(data, dict) else {}
 
     async def _http_get_text_with_retry(self, url: str, timeout: float = 15) -> tuple[int, str]:
         """Shared-session HTTP GET with ``retry_rss_http`` (RETRY-002 RSS path).
@@ -2092,7 +2151,7 @@ class AutonomousBlueskyBotV2:
         return selected_template
     
     async def smart_engagement(self) -> None:
-        """Умное взаимодействие (ENG-001 → SmartEngagementOrchestrator)."""
+        """Умное взаимодействие (ENG-001 + trends feed likes)."""
         _sg = self._safety_status()
         if not _sg.can_engagement:
             logger.info(
@@ -2106,6 +2165,17 @@ class AutonomousBlueskyBotV2:
             compliant_no_comments=bool(BLUESKY_COMPLIANT_MODE and NO_AUTO_COMMENTS),
         )
         await self.smart_engagement_orchestrator.run(cfg)
+        # Official «Актуальные» feeds — separate budget slice, does not filter RSS
+        trends_cfg = getattr(self, "trending_tracker", None)
+        if trends_cfg is not None:
+            trends_cfg.configure(self.config.get("trends", {}))
+        t_eng = TrendsEngagementConfig.from_bot_config(
+            self.config,
+            max_likes=max(1, min(3, int(self.max_interactions_per_cycle))),
+        )
+        orch = getattr(self, "trends_engagement_orchestrator", None)
+        if orch is not None:
+            await orch.run(t_eng)
 
     def calculate_relevance(self, text: str, post) -> float:
         """Компонентный score (REL-001 → relevance_scoring)."""

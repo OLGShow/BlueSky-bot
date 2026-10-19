@@ -69,6 +69,8 @@ PYFILES=(
     smart_engagement.py
     state_service.py
     strategy_learning.py
+    trends.py
+    trends_engagement.py
     url_safety.py
     verify_bot.py
 )

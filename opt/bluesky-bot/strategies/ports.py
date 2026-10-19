@@ -563,11 +563,15 @@ class ViralPostsPorts:
 
     Bot (composition root) builds one instance and injects it; strategy modules
     must not import ``bluesky_bot_v2``.
+
+    ``pick_trending_theme`` — optional live «Актуальные» label; ``None``/empty
+    falls back to static ``TRENDING_THEMES``.
     """
 
     content: StructuredContentPort
     image: ImagePostPorts
     viral_prompts: ViralPromptsPort
+    pick_trending_theme: Optional[Callable[[], Awaitable[Optional[str]]]] = None
 
 
 # --- Soft-fail / duplicate fallback (SOFT-001…003) ---

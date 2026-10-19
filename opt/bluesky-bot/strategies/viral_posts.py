@@ -20,6 +20,21 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 from .image_post import ImagePostHelper
 from .ports import ViralPostsPorts
 
+
+async def _resolve_trending_theme(
+    ports: ViralPostsPorts,
+) -> str:
+    """Prefer live getTrends theme; else static TRENDING_THEMES."""
+    picker = getattr(ports, "pick_trending_theme", None)
+    if picker is not None:
+        try:
+            live = await picker()
+            if live:
+                return str(live)
+        except Exception:
+            pass
+    return random.choice(list(TRENDING_THEMES))
+
 # Stable config / learning / A/B / registry keys (do not rename).
 VIRAL_HOT_TAKE_STRATEGY_NAME = "_create_viral_hot_take"
 TRENDING_COMMENTARY_STRATEGY_NAME = "_create_trending_commentary"
@@ -79,7 +94,9 @@ def _build_hot_take_fallback(selected_topic: str) -> Dict[str, str]:
 
 def _build_trending_prompt(selected_theme: str) -> str:
     return f"""
-            Create ONE concise social post about "{selected_theme}".
+            Create ONE concise social post about the current Bluesky topic: "{selected_theme}".
+            Tie it to tech, AI, creators, culture, or a concrete personal angle when possible —
+            avoid empty newsjacking ("X is trending" with no insight).
             Return ONLY JSON with keys "post_text" and "hashtags".
             post_text: 180-230 chars, concrete angle, one clear implication, one question at the end.
             hashtags: 2-4 English tags starting with #.
@@ -89,10 +106,10 @@ def _build_trending_prompt(selected_theme: str) -> str:
 def _build_trending_fallback(selected_theme: str) -> Dict[str, str]:
     return {
         "post_text": (
-            f"📰 Breaking: {selected_theme} is trending. Here's my take on what "
-            "this really means for the industry... Thoughts?"
+            f"Seeing a lot about {selected_theme}. The underrated angle: "
+            "what it changes for builders and audiences next. What's your take?"
         ),
-        "hashtags": "#breaking #tech #analysis #trends",
+        "hashtags": "#discussion #tech #culture #trends",
     }
 
 
@@ -149,7 +166,7 @@ class TrendingCommentaryStrategy:
 
     async def create(self) -> Any:
         """Produce a trending commentary post (image when generation succeeds)."""
-        selected_theme = random.choice(list(TRENDING_THEMES))
+        selected_theme = await _resolve_trending_theme(self._ports)
 
         async def content_creator() -> Optional[Mapping[str, Any]]:
             return await self._ports.content.generate(

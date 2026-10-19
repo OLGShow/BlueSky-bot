@@ -14,78 +14,11 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from collections import Counter, defaultdict
 import logging
-from atproto import AsyncClient
+
+from trends import BlueSkyTrendingTracker
 
 logger = logging.getLogger(__name__)
 
-class BlueSkyTrendingTracker:
-    """Tracks trending topics and hashtags from BlueSky for dynamic content generation"""
-    
-    def __init__(self, client: AsyncClient):
-        self.client = client
-        self.trending_cache = {}
-        self.cache_expiry = timedelta(hours=2)
-        self.last_update = None
-    
-    async def get_trending_topics(self, limit: int = 20) -> List[Dict]:
-        """Get currently trending topics from BlueSky"""
-        try:
-            # Check cache first
-            if (self.last_update and 
-                datetime.now() - self.last_update < self.cache_expiry and
-                self.trending_cache):
-                return self.trending_cache.get('topics', [])
-            
-            logger.info("🔍 Fetching trending topics from BlueSky...")
-            
-            # Get recent timeline posts
-            timeline = await self.client.app.bsky.feed.get_timeline({'limit': 100})
-            
-            # Extract hashtags and topics
-            hashtags = []
-            topics = []
-            
-            for post in timeline.feed:
-                if hasattr(post.post, 'record') and hasattr(post.post.record, 'text'):
-                    text = post.post.record.text
-                    
-                    # Extract hashtags
-                    post_hashtags = re.findall(r'#(\w+)', text)
-                    hashtags.extend([tag.lower() for tag in post_hashtags])
-                    
-                    # Extract potential topics (noun phrases)
-                    words = re.findall(r'\b[A-Za-z]{4,}\b', text)
-                    topics.extend([word.lower() for word in words])
-            
-            # Count and rank
-            hashtag_counts = Counter(hashtags).most_common(limit)
-            topic_counts = Counter(topics).most_common(limit)
-            
-            trending_data = {
-                'hashtags': [{'tag': tag, 'count': count} for tag, count in hashtag_counts],
-                'topics': [{'topic': topic, 'count': count} for topic, count in topic_counts],
-                'timestamp': datetime.now().isoformat()
-            }
-            
-            # Update cache
-            self.trending_cache = trending_data
-            self.last_update = datetime.now()
-            
-            logger.info(f"✅ Found {len(hashtag_counts)} trending hashtags, {len(topic_counts)} topics")
-            return trending_data['topics']
-            
-        except Exception as e:
-            logger.error(f"❌ Error fetching trending topics: {e}")
-            return []
-    
-    async def get_trending_hashtags(self) -> List[str]:
-        """Get trending hashtags for posts"""
-        try:
-            await self.get_trending_topics()  # Update cache
-            hashtags = self.trending_cache.get('hashtags', [])
-            return [f"#{item['tag']}" for item in hashtags[:10]]
-        except:
-            return ["#trending", "#discussion", "#thoughts"]
 
 class DynamicContentGenerator:
     """Advanced content generation with 53.4% general focus"""

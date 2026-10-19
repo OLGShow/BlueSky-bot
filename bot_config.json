@@ -219,5 +219,19 @@
     "interval_days": 7,
     "state_path": "learning_retro_state.json",
     "dry_run": true
+  },
+  "trends": {
+    "enabled": true,
+    "limit": 15,
+    "cache_minutes": 45,
+    "use_for_posts": true,
+    "use_for_engagement": true,
+    "deny_keywords": [],
+    "allow_categories": [],
+    "min_post_count": 0,
+    "max_topics": 10,
+    "engagement_topics_per_cycle": 3,
+    "engagement_posts_per_topic": 5,
+    "public_api_base": "https://public.api.bsky.app"
   }
 }

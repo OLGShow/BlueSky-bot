@@ -1,13 +1,13 @@
 Package: bluesky-bot
-Version: 3.1.16
+Version: 3.1.17
 Architecture: all
 Maintainer: OLGShow <olg@example.com>
 Depends: python3 (>= 3.10), python3-venv, python3-pip
-Filename: pool/bluesky-bot_3.1.16_all.deb
-Size: 140390
-MD5sum: 87e19469cefcceb474971807d9707969
-SHA1: 31480ffd0f9e48a545a14d9b51eb6b3a56e4608e
-SHA256: b304130f1be10cf732c73a1a655e0a992e04106062ba2f8ff9ab6e41d53c84ec
+Filename: pool/bluesky-bot_3.1.17_all.deb
+Size: 143308
+MD5sum: 873f3cb6200fc416d9c9d2d37a90c590
+SHA1: c5c53a7912e0fbc14f6880ca6641d2e5a81d7920
+SHA256: e09a6afc2ffcec78ae000abaa53b210bb6672624bf794162f63ed299c0db96d6
 Section: net
 Priority: optional
 Homepage: https://github.com/OLGShow/BlueSky-bot

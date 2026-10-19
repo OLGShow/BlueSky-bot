@@ -25,9 +25,7 @@ Deps inventory: bot today → ports surface
 Private helpers **not** moved into this surface (stay on bot / other
 strategies until a later family extract):
 
-- ``_create_post_with_image_generation`` — used by opinion fallback, not
-  news happy-path directly
-- ``upload_image_to_bluesky`` — reached only via ``LinkPreviewPort``
+- ``upload_image_to_bluesky`` (URL path) — reached only via ``LinkPreviewPort``
 - ``clean_html`` / feedparser loop — inside ``fetch_external_content``
 - Quality-gate regen flag — owned by content/quality path, not news pick
 
@@ -37,6 +35,44 @@ News item shape expected from ``RssHeadlinesPort`` (dict keys used today):
 - ``description`` (truthy required to select)
 - ``url`` (str, optional — duplicate + link card)
 - ``image_url`` (str, optional — duplicate + thumb)
+
+===========================================================================
+Deps inventory: image / theme helpers (STRAT-004)
+===========================================================================
+
+| Bot call / field (today)                              | Port / field here                 | Role |
+|-------------------------------------------------------|-----------------------------------|------|
+| ``formatter.create_post(text, content_type=, …)``     | ``PostFactoryPort`` (shared)      | Text / image post shell |
+| ``create_image_prompt_from_text(topic)``              | ``ImagePromptPort.create_prompt`` | LLM visual prompt from topic |
+| ``pollinations_ai.generate_image_data(prompt)``       | ``ImageGeneratorPort``            | Bytes from image model |
+| ``upload_image_data_to_bluesky(bytes)``               | ``ImageUploadPort.upload``        | ATProto blob for embed |
+| ``generate_structured_post_content(prompt, …)``       | ``StructuredContentPort`` (theme) | Theme LLM JSON payload |
+| ``_create_post_with_image_generation``                | ``ImagePostHelper`` + ports       | Shared image/fallback glue |
+| ``_quality_theme_post``                               | ``ThemePostHelper`` + ports       | Theme pick → image helper |
+| ``_create_quality_ai_insight`` (STRAT-006)            | ``ThemePostHelper`` + themes      | AI insight theme family |
+| ``_create_quality_list_post`` (STRAT-006)             | ``ThemePostHelper`` + themes      | List theme family |
+| ``_create_personal_insight`` (STRAT-008)              | ``ThemePostPorts`` + helper       | Insight themes → image post |
+| ``_create_prediction_post`` (STRAT-008)               | ``ThemePostPorts`` + helper       | Prediction themes → image post |
+
+===========================================================================
+Deps inventory: dynamic family (STRAT-005)
+===========================================================================
+
+| Bot call / field (today)                              | Port / field here                 | Role |
+|-------------------------------------------------------|-----------------------------------|------|
+| ``dynamic_generator.generate_dynamic_content(…)``     | ``DynamicContentPort.generate``   | Opinion / tip / discussion body |
+| ``dynamic_generator._generate_fallback_content()``    | ``DynamicContentPort.fallback``   | Soft miss structured payload |
+| ``_create_post_with_image_generation``                | ``ImagePostHelper`` via ports     | Image + formatter glue |
+| ``_create_emergency_unique_post``                     | ``FallbackPostPort.create``       | Hard-fail emergency path |
+
+Stable registry / learning keys (do not rename):
+
+- ``_create_personal_opinion_post``
+- ``_create_quality_tip_post``
+- ``_create_quality_discussion``
+
+Deferred (not in this ports surface yet): ``_create_viral_hot_take``,
+``_create_trending_commentary`` — same ThemePostHelper pattern, next extract.
 
 Import rules (ADR invariants):
 - This module must not import ``bluesky_bot_v2`` or application services.
@@ -50,6 +86,7 @@ from typing import (
     Any,
     Awaitable,
     Callable,
+    Dict,
     Mapping,
     Optional,
     Protocol,
@@ -172,9 +209,16 @@ class CallableStructuredContent:
 
 @runtime_checkable
 class PostFactoryPort(Protocol):
-    """Build a plain post object (no embed) from final text."""
+    """Build a post object from final text (optional image blob embed)."""
 
-    def create_post(self, text: str, *, content_type: str = "news") -> Any: ...
+    def create_post(
+        self,
+        text: str,
+        *,
+        content_type: str = "news",
+        image_blob: Optional[Any] = None,
+        image_alt_text: Optional[str] = None,
+    ) -> Any: ...
 
 
 @dataclass
@@ -183,8 +227,20 @@ class CallablePostFactory:
 
     _create_post: Callable[..., Any]
 
-    def create_post(self, text: str, *, content_type: str = "news") -> Any:
-        return self._create_post(text, content_type=content_type)
+    def create_post(
+        self,
+        text: str,
+        *,
+        content_type: str = "news",
+        image_blob: Optional[Any] = None,
+        image_alt_text: Optional[str] = None,
+    ) -> Any:
+        kwargs: Dict[str, Any] = {"content_type": content_type}
+        if image_blob is not None:
+            kwargs["image_blob"] = image_blob
+        if image_alt_text is not None:
+            kwargs["image_alt_text"] = image_alt_text
+        return self._create_post(text, **kwargs)
 
 
 # --- Link preview + image ---
@@ -259,3 +315,187 @@ class NewsStrategyPorts:
     posts: PostFactoryPort
     link_preview: LinkPreviewPort
     fallback: FallbackPostPort
+
+
+# --- Image generation / upload (STRAT-004) ---
+
+
+@runtime_checkable
+class ImagePromptPort(Protocol):
+    """Turn a topic/text into a visual generation prompt."""
+
+    async def create_prompt(self, text: str) -> str: ...
+
+
+@dataclass
+class CallableImagePrompt:
+    """Binds ``create_image_prompt_from_text``-shaped callable."""
+
+    _create: Callable[[str], Awaitable[str]]
+
+    async def create_prompt(self, text: str) -> str:
+        return await self._create(text)
+
+
+@runtime_checkable
+class ImageGeneratorPort(Protocol):
+    """Generate raw image bytes from a visual prompt (e.g. Pollinations)."""
+
+    async def generate_image_data(self, prompt: str) -> Optional[bytes]: ...
+
+
+@dataclass
+class CallableImageGenerator:
+    """Binds ``pollinations_ai.generate_image_data``-shaped callable."""
+
+    _generate: Callable[[str], Awaitable[Optional[bytes]]]
+
+    async def generate_image_data(self, prompt: str) -> Optional[bytes]:
+        return await self._generate(prompt)
+
+
+@runtime_checkable
+class ImageUploadPort(Protocol):
+    """Upload image bytes to BlueSky; returns blob handle or ``None``."""
+
+    async def upload(self, image_data: bytes) -> Optional[Any]: ...
+
+
+@dataclass
+class CallableImageUpload:
+    """Binds ``upload_image_data_to_bluesky``-shaped callable."""
+
+    _upload: Callable[[bytes], Awaitable[Optional[Any]]]
+
+    async def upload(self, image_data: bytes) -> Optional[Any]:
+        return await self._upload(image_data)
+
+
+@dataclass
+class ImagePostPorts:
+    """Dependencies for :class:`~strategies.image_post.ImagePostHelper`.
+
+    Bot (composition root) builds one instance and injects it; strategy /
+    helper modules must not import ``bluesky_bot_v2``.
+    """
+
+    posts: PostFactoryPort
+    image_prompt: ImagePromptPort
+    image_gen: ImageGeneratorPort
+    image_upload: ImageUploadPort
+
+
+@dataclass
+class ThemePostPorts:
+    """Dependencies for :class:`~strategies.image_post.ThemePostHelper`.
+
+    Theme pick → structured LLM → shared image-post path (STRAT-004 / STRAT-006).
+    """
+
+    content: StructuredContentPort
+    image: ImagePostPorts
+
+
+# --- Poll factory (STRAT-007) ---
+#
+# | Bot call / field (today)                         | Port / field here              | Role |
+# |--------------------------------------------------|--------------------------------|------|
+# | ``generate_structured_post_content(prompt, …)``  | ``StructuredContentPort``      | LLM intro + hashtags |
+# | ``formatter.create_poll(question=, options=, …)``| ``PollFactoryPort.create_poll``| Poll RichTextPost shell |
+
+
+@runtime_checkable
+class PollFactoryPort(Protocol):
+    """Build a poll post from question text and option labels."""
+
+    def create_poll(
+        self,
+        *,
+        question: str,
+        options: Sequence[str],
+        duration_hours: int = 24,
+        content_type: str = "poll",
+    ) -> Any: ...
+
+
+@dataclass
+class CallablePollFactory:
+    """Binds ``formatter.create_poll``-shaped callable."""
+
+    _create_poll: Callable[..., Any]
+
+    def create_poll(
+        self,
+        *,
+        question: str,
+        options: Sequence[str],
+        duration_hours: int = 24,
+        content_type: str = "poll",
+    ) -> Any:
+        return self._create_poll(
+            question=question,
+            options=list(options),
+            duration_hours=duration_hours,
+            content_type=content_type,
+        )
+
+
+@dataclass
+class PollStrategyPorts:
+    """Dependencies for :class:`~strategies.poll_post.QualityPollStrategy`.
+
+    Bot (composition root) builds one instance and injects it; strategy
+    modules must not import ``bluesky_bot_v2``.
+    """
+
+    content: StructuredContentPort
+    poll: PollFactoryPort
+
+
+# --- Dynamic content generator (STRAT-005) ---
+
+
+@runtime_checkable
+class DynamicContentPort(Protocol):
+    """Audience-weighted dynamic post text + hashtags (and soft fallback)."""
+
+    async def generate(
+        self, content_type: Optional[str] = None
+    ) -> Mapping[str, Any]:
+        """Return dict with at least ``post_text`` / ``hashtags`` (optional topic)."""
+        ...
+
+    def fallback(self) -> Mapping[str, Any]:
+        """Safe structured payload when primary dynamic path soft-fails."""
+        ...
+
+
+@dataclass
+class CallableDynamicContent:
+    """Binds ``DynamicContentGenerator.generate_dynamic_content`` + fallback."""
+
+    _generate: Callable[..., Awaitable[Mapping[str, Any]]]
+    _fallback: Callable[[], Mapping[str, Any]]
+
+    async def generate(
+        self, content_type: Optional[str] = None
+    ) -> Mapping[str, Any]:
+        if content_type is None:
+            return await self._generate()
+        return await self._generate(content_type)
+
+    def fallback(self) -> Mapping[str, Any]:
+        return self._fallback()
+
+
+@dataclass
+class DynamicPostsPorts:
+    """Dependencies for opinion / tip / discussion strategies (STRAT-005).
+
+    Bot (composition root) builds one instance and injects it; strategy modules
+    must not import ``bluesky_bot_v2``.
+    """
+
+    dynamic: DynamicContentPort
+    image: ImagePostPorts
+    emergency: FallbackPostPort

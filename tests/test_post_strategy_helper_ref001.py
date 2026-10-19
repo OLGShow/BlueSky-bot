@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-REF-001: Thin PostStrategy helper — hermetic AST / source checks.
+REF-001 / STRAT-006: Theme helper + thin AI-insight / list delegates (AST).
 
-Verifies that `_quality_theme_post` exists and that quality AI-insight /
-list strategies delegate to it, without importing or executing the bot.
+Verifies that `_quality_theme_post` still exists (STRAT-004 ThemePostHelper
+bridge) and that quality AI-insight / list methods thin-delegate to extracted
+strategies (STRAT-006), without importing or executing the bot.
 
 Run:
   python tests/test_post_strategy_helper_ref001.py
@@ -16,18 +17,18 @@ import ast
 import os
 import unittest
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 APP_DIR = REPO_ROOT / "app"
 BOT_MODULE = APP_DIR / "bluesky_bot_v2.py"
 
 HELPER_NAME = "_quality_theme_post"
-DELEGATE_METHODS = (
-    "_create_quality_ai_insight",
-    "_create_quality_list_post",
+# (bot method, strategy instance attribute that must expose .create())
+THEME_DELEGATES: Tuple[Tuple[str, str], ...] = (
+    ("_create_quality_ai_insight", "quality_ai_insight_strategy"),
+    ("_create_quality_list_post", "quality_list_strategy"),
 )
-# Strategy selection / dispatch identifiers that must remain present.
 DISPATCH_STRINGS = (
     "_create_quality_ai_insight",
     "_create_quality_list_post",
@@ -58,16 +59,22 @@ def _methods_on_class(cls: ast.ClassDef) -> Dict[str, ast.AsyncFunctionDef | ast
     return out
 
 
-def _await_calls_named(fn: ast.AST, name: str) -> List[ast.Call]:
-    """Collect Call nodes that invoke `self.<name>(...)` or bare `<name>(...)`."""
+def _await_strategy_create_calls(fn: ast.AST, strategy_attr: str) -> List[ast.Call]:
+    """Collect ``self.<strategy_attr>.create(...)`` Call nodes."""
     found: List[ast.Call] = []
     for node in ast.walk(fn):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        if isinstance(func, ast.Attribute) and func.attr == name:
-            found.append(node)
-        elif isinstance(func, ast.Name) and func.id == name:
+        if not isinstance(func, ast.Attribute) or func.attr != "create":
+            continue
+        value = func.value
+        if (
+            isinstance(value, ast.Attribute)
+            and value.attr == strategy_attr
+            and isinstance(value.value, ast.Name)
+            and value.value.id == "self"
+        ):
             found.append(node)
     return found
 
@@ -98,7 +105,6 @@ class TestPostStrategyHelperRef001(unittest.TestCase):
         )
         helper = self.methods[HELPER_NAME]
         self.assertIsInstance(helper, ast.AsyncFunctionDef)
-        # Signature sanity: themes + keyword-only style params used by delegates.
         arg_names = [a.arg for a in helper.args.args] + [
             a.arg for a in helper.args.kwonlyargs
         ]
@@ -106,16 +112,22 @@ class TestPostStrategyHelperRef001(unittest.TestCase):
         for expected in ("build_prompt", "content_type", "model_key", "build_fallback"):
             self.assertIn(expected, arg_names, f"helper missing param {expected!r}")
 
-    def test_delegates_call_quality_theme_post(self):
-        for method_name in DELEGATE_METHODS:
+    def test_theme_methods_thin_delegate_to_strategies(self):
+        for method_name, strategy_attr in THEME_DELEGATES:
             with self.subTest(method=method_name):
                 self.assertIn(method_name, self.methods, f"{method_name} missing on bot")
-                fn = self.methods[method_name]
-                calls = _await_calls_named(fn, HELPER_NAME)
+                self.assertIn(
+                    strategy_attr,
+                    self.source,
+                    f"{strategy_attr} must be wired on the bot",
+                )
+                calls = _await_strategy_create_calls(
+                    self.methods[method_name], strategy_attr
+                )
                 self.assertGreaterEqual(
                     len(calls),
                     1,
-                    f"{method_name} must call {HELPER_NAME}",
+                    f"{method_name} must call self.{strategy_attr}.create()",
                 )
 
     def test_strategy_dispatch_strings_present(self):
@@ -123,17 +135,12 @@ class TestPostStrategyHelperRef001(unittest.TestCase):
         literals = _string_literals_in_module(self.tree)
         for name in DISPATCH_STRINGS:
             with self.subTest(name=name):
-                # Method def always exists as FunctionDef; also expect string keys
-                # for ai insight in post_strategies. List may only appear as def —
-                # require method present AND at least the name as source substring
-                # so rename/removal fails loudly.
                 self.assertIn(name, self.methods, f"{name} method missing")
                 self.assertIn(
                     name,
                     self.source,
                     f"{name} must remain in bluesky_bot_v2.py source",
                 )
-        # AI insight is wired into default post_strategies weights.
         self.assertIn(
             "_create_quality_ai_insight",
             literals,
@@ -148,11 +155,12 @@ def run_ref001_assertions() -> None:
     assert bot_cls is not None, "AutonomousBlueskyBotV2 not found"
     methods = _methods_on_class(bot_cls)
     assert HELPER_NAME in methods, f"{HELPER_NAME} missing on AutonomousBlueskyBotV2"
-    for method_name in DELEGATE_METHODS:
-        assert method_name in methods, f"{method_name} missing"
-        calls = _await_calls_named(methods[method_name], HELPER_NAME)
-        assert calls, f"{method_name} must call {HELPER_NAME}"
     source = _load_module_source()
+    for method_name, strategy_attr in THEME_DELEGATES:
+        assert method_name in methods, f"{method_name} missing"
+        assert strategy_attr in source, f"{strategy_attr} missing from source"
+        calls = _await_strategy_create_calls(methods[method_name], strategy_attr)
+        assert calls, f"{method_name} must call self.{strategy_attr}.create()"
     for name in DISPATCH_STRINGS:
         assert name in source, f"{name} missing from source"
     literals = _string_literals_in_module(tree)

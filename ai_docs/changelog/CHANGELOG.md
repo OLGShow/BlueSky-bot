@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Added
+- Strategy families extract — `ImagePostHelper` + dynamic / theme / poll / insight+prediction (`STRAT-004`…`008`); hybrid registry overwrite for remaining default-weight keys
+- Hermetic strategy/HTTP/retry suites: `test_image_post_helper_strat004`, `test_dynamic_posts_strat005`, `test_theme_posts_strat006`, `test_quality_poll_strategy_strat007`, `test_insight_posts_strat008`, `test_http_session_http002`, `test_retry_policy_retry003`
 - Strategy package `app/strategies/` — `QualityNewsStrategy` + news ports; hybrid registry overwrite for `_create_quality_news_post` (STRAT-001…003)
 - Unified quality pipeline (`quality_pipeline.py`) — `QualityPipeline.evaluate` / `regenerate_until_quality` on scheduled post (QUAL-001 / QUAL-002)
 - Outbound `RetryPolicy` factory (`OutboundRetryPolicies`) + hermetic retry tests (`tests/test_retry_policy_retry002.py`) (RETRY-001 / RETRY-002)
@@ -26,9 +28,11 @@
 - Audit deferred/FP tracking: [ISS-001](../develop/issues/ISS-001-audit-deferred-fp-findings.md)
 
 ### Changed
+- Formatter / rich_posts use injected shared `ClientSession` (HTTP-002); Phase 6 shared-HTTP complete for AI + post formatters
+- ATProto + media upload paths use `retry_atproto` / `retry_media_upload` via `RetryPolicy.execute` (RETRY-003); Phase 4 outbound retry complete for catalogued I/O
 - OpenRouter / Pollinations use injected shared `ClientSession` + `RetryPolicy.execute`; RSS GET via `_http_get_text_with_retry` (RETRY-002 / HTTP-001)
-- Packaging sync includes `strategies/` package dir + `quality_pipeline.py` under `opt/`
-- Full `post_strategies` registry registration + `create_scheduled_post` dispatch via `weighted_entries` / `resolve` (STRAT-001 / STRAT-002); news family extracted (STRAT-003); other families still deferred
+- Packaging sync includes `strategies/` package dir + `quality_pipeline.py` under `opt/` (8 strategy modules mirrored)
+- Full `post_strategies` registry registration + `create_scheduled_post` dispatch via `weighted_entries` / `resolve` (STRAT-001 / STRAT-002); news + dynamic/theme/poll/insight+prediction extracted; viral/soft-fail leftovers deferred
 - Packaging sync includes `content_ports.py` (and prior `engagement_ports.py` / `post_strategies.py`) mirrors under `opt/`
 - Single systemd unit SoT (`systemd/bluesky-bot.service`); `build-deb.sh` copies unit via `cp` (LAY-003)
 - `opt/bluesky-bot/env.example` aligned with root SoT (LAY-002)
@@ -41,6 +45,8 @@
 - Bluesky empty/whitespace handle/password fail-fast in `main()` (VER-001)
 
 ### Fixed
+- List-strategy fallback newlines — `_build_list_fallback` used literal `\\n`; now real newlines (app + opt); see STRAT-006 in [implementation report](../develop/reports/2026-10-19-strat-families-http-retry-implementation.md)
+- Remaining strategy families + HTTP-002 + RETRY-003 (`orch-2026-10-19-17-34-strat-families`) — smoke 2/2; unittest 246 OK (3 skipped); viral + Phase 7 deferred; see [implementation report](../develop/reports/2026-10-19-strat-families-http-retry-implementation.md)
 - STRAT-003 + RetryPolicy / Quality / Shared HTTP cycle (`orch-2026-10-19-17-06-strat003-io`) — smoke 2/2; unittest 193 OK (3 skipped); see [implementation report](../develop/reports/2026-10-19-strat003-retry-quality-http-implementation.md)
 - God Object Phase 2+ ContentService ports + strategy registry wiring (`orch-2026-10-19-15-06-godobj-p2`) — see [implementation report](../develop/reports/2026-10-19-god-object-phase2-content-strategies-implementation.md)
 - Layout hygiene Stages 1–4: untracked root `__pycache__/`, env.example drift, systemd SoT/heredoc, opt docs (`orch-2026-10-19-14-33-layout-godobj`) — see [implementation report](../develop/reports/2026-10-19-layout-and-god-object-prep-implementation.md)

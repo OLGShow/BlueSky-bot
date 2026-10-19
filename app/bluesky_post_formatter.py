@@ -53,13 +53,19 @@ class RichTextPost:
 class BlueskyPostFormatter:
     """Форматирование постов для BlueSky с rich text поддержкой"""
     
-    def __init__(self, client=None):
+    def __init__(self, client=None, http_session: Optional[aiohttp.ClientSession] = None):
         """
         Инициализация форматировщика
         Args:
             client: BlueSky AsyncClient для резолва DID (опционально)
+            http_session: Optional shared ClientSession (caller owns lifecycle)
         """
         self.client = client
+        # Shared session: lifecycle owned by bot/http_session helpers (_owns_session=False).
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._owns_session: bool = True
+        if http_session is not None:
+            self.set_http_session(http_session)
         
         self.link_pattern = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]+')
         self.mention_pattern = re.compile(r'@([a-zA-Z0-9.-]+)')
@@ -335,6 +341,44 @@ class BlueskyPostFormatter:
         
         return post
     
+    def set_http_session(self, session: Optional[aiohttp.ClientSession]) -> None:
+        """Inject shared ClientSession; caller owns create/recreate/close.
+
+        Pass ``None`` to detach shared session (private fallback may be created later).
+        """
+        if session is not None:
+            self._session = session
+            self._owns_session = False
+        else:
+            self._session = None
+            self._owns_session = True
+
+    async def get_session(self) -> aiohttp.ClientSession:
+        """Return shared session when injected; else create a private one."""
+        if not self._owns_session:
+            if self._session is None or self._session.closed:
+                raise RuntimeError(
+                    "Shared HTTP session is closed or unset; "
+                    "lifecycle owner must inject a live ClientSession"
+                )
+            return self._session
+
+        if self._session is None or self._session.closed:
+            timeout = aiohttp.ClientTimeout(total=60, connect=30)
+            connector = aiohttp.TCPConnector(limit=10, limit_per_host=5)
+            self._session = aiohttp.ClientSession(
+                timeout=timeout,
+                connector=connector,
+            )
+            self._owns_session = True
+        return self._session
+
+    async def close_session(self) -> None:
+        """Close private session only; shared sessions are owned by the injector."""
+        if self._owns_session and self._session is not None and not self._session.closed:
+            await self._session.close()
+        self._session = None
+
     async def add_image_to_post(self, post: RichTextPost, image_url: str, 
                                client = None) -> RichTextPost:
         """Добавляет изображение к посту (требует BlueSky client)"""
@@ -344,22 +388,22 @@ class BlueskyPostFormatter:
                 
             # Скачиваем изображение
             image_url = validate_outbound_url(image_url)
-            async with aiohttp.ClientSession() as session:
-                async with session.get(image_url) as response:
-                    if response.status == 200:
-                        image_data = await response.read()
-                        
-                        # Загружаем через AT Protocol
-                        blob = await client.upload_blob(image_data)
-                        
-                        # Создаем embed с изображением
-                        post.embed = {
-                            "$type": "app.bsky.embed.images",
-                            "images": [{
-                                "alt": "Изображение к посту",
-                                "image": blob
-                            }]
-                        }
+            session = await self.get_session()
+            async with session.get(image_url) as response:
+                if response.status == 200:
+                    image_data = await response.read()
+                    
+                    # Загружаем через AT Protocol
+                    blob = await client.upload_blob(image_data)
+                    
+                    # Создаем embed с изображением
+                    post.embed = {
+                        "$type": "app.bsky.embed.images",
+                        "images": [{
+                            "alt": "Изображение к посту",
+                            "image": blob
+                        }]
+                    }
                         
         except UnsafeURLError:
             pass

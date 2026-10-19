@@ -16,6 +16,7 @@ Protocol ↔ bot attribute mapping (today → ports):
 | EngagementIdentityPort       | ``liked_posts``, ``reposted_posts``,      |
 |                              | ``followed_users``, ``recent_repost_authors`` |
 | EngagementConfigView         | ``bot.config`` engagement_mode / whitelist|
+| RetryExecutePort (optional)  | ``bot.retry_atproto`` (RETRY-003)         |
 
 Import rules (ADR invariants):
 - This module must not import ``bluesky_bot_v2`` or application services.
@@ -49,6 +50,16 @@ class EngagementClientPort(Protocol):
     async def repost(self, uri: str, cid: str) -> Any: ...
 
     async def follow(self, did: str) -> Any: ...
+
+
+# --- Optional outbound retry (RETRY-003; duck-typed RetryPolicy) ---
+
+
+@runtime_checkable
+class RetryExecutePort(Protocol):
+    """Minimal contract for ``RetryPolicy.execute`` (no resilience import)."""
+
+    async def execute(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any: ...
 
 
 # --- Action ledger (idempotency) ---
@@ -255,3 +266,5 @@ class EngagementPorts:
     stats: EngagementStatsPort
     identity: EngagementIdentityPort
     config: EngagementConfigPort
+    # Optional RetryPolicy (retry_atproto) for like/repost/follow writes (RETRY-003).
+    retry: Optional[RetryExecutePort] = None

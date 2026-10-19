@@ -327,7 +327,7 @@ def test_verify_acceptance_ver001():
 
 @test("REF-001: PostStrategy helper _quality_theme_post (AST hermetic)")
 def test_post_strategy_helper_ref001():
-    """ai_insight + list_post delegate to shared _quality_theme_post."""
+    """ai_insight + list thin-delegate to ThemePostHelper strategies (STRAT-006)."""
     from tests.test_post_strategy_helper_ref001 import run_ref001_assertions
     run_ref001_assertions()
 

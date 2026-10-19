@@ -43,12 +43,60 @@ class LinkCard:
 class BlueskyRichPostCreator:
     """Создатель богатых постов с поддержкой медиа"""
     
-    def __init__(self, client=None):
+    def __init__(self, client=None, http_session: Optional[aiohttp.ClientSession] = None):
         self.client = client
+        # Shared session: lifecycle owned by bot/http_session helpers (_owns_session=False).
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._owns_session: bool = True
         self.formatter = BlueskyPostFormatter()
+        if http_session is not None:
+            self.set_http_session(http_session)
         self.max_image_size = 1_000_000  # 1MB
         self.supported_image_types = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
-        
+
+    def set_http_session(self, session: Optional[aiohttp.ClientSession]) -> None:
+        """Inject shared ClientSession; caller owns create/recreate/close.
+
+        Pass ``None`` to detach shared session (private fallback may be created later).
+        Propagates to the nested formatter.
+        """
+        if session is not None:
+            self._session = session
+            self._owns_session = False
+        else:
+            self._session = None
+            self._owns_session = True
+        if hasattr(self, 'formatter') and self.formatter is not None:
+            self.formatter.set_http_session(session)
+
+    async def get_session(self) -> aiohttp.ClientSession:
+        """Return shared session when injected; else create a private one."""
+        if not self._owns_session:
+            if self._session is None or self._session.closed:
+                raise RuntimeError(
+                    "Shared HTTP session is closed or unset; "
+                    "lifecycle owner must inject a live ClientSession"
+                )
+            return self._session
+
+        if self._session is None or self._session.closed:
+            timeout = aiohttp.ClientTimeout(total=60, connect=30)
+            connector = aiohttp.TCPConnector(limit=10, limit_per_host=5)
+            self._session = aiohttp.ClientSession(
+                timeout=timeout,
+                connector=connector,
+            )
+            self._owns_session = True
+        return self._session
+
+    async def close_session(self) -> None:
+        """Close private session only; shared sessions are owned by the injector."""
+        if self._owns_session and self._session is not None and not self._session.closed:
+            await self._session.close()
+        self._session = None
+        if hasattr(self, 'formatter') and self.formatter is not None:
+            await self.formatter.close_session()
+
     async def upload_image(self, image_data: ImageData) -> Optional[Dict]:
         """Загружает изображение и возвращает blob для embed"""
         if not self.client:
@@ -171,45 +219,45 @@ class BlueskyRichPostCreator:
             logger.warning(f"⚠️ Unsafe URL rejected for link metadata: {e}")
             return None
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=10) as response:
-                    if response.status != 200:
-                        return None
-                    
-                    html = await response.text()
-                    
-                    # Простой парсинг meta-тегов
-                    title_match = re.search(r'<title>([^<]+)</title>', html, re.IGNORECASE)
-                    title = title_match.group(1) if title_match else url
-                    
-                    desc_match = re.search(r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
-                    description = desc_match.group(1) if desc_match else ""
-                    
-                    # Ищем og:image
-                    og_image_match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
-                    
-                    thumbnail = None
-                    if og_image_match:
-                        image_url = og_image_match.group(1)
-                        # Загружаем изображение
-                        try:
-                            image_url = validate_outbound_url(image_url)
-                            async with session.get(image_url, timeout=5) as img_response:
-                                if img_response.status == 200:
-                                    img_data = await img_response.read()
-                                    mime_type = img_response.headers.get('Content-Type', 'image/jpeg')
-                                    thumbnail = ImageData(data=img_data, mime_type=mime_type)
-                        except UnsafeURLError:
-                            pass
-                        except Exception:
-                            pass
-                    
-                    return LinkCard(
-                        url=url,
-                        title=title[:100],  # Ограничиваем длину
-                        description=description[:300],
-                        thumbnail=thumbnail
-                    )
+            session = await self.get_session()
+            async with session.get(url, timeout=10) as response:
+                if response.status != 200:
+                    return None
+                
+                html = await response.text()
+                
+                # Простой парсинг meta-тегов
+                title_match = re.search(r'<title>([^<]+)</title>', html, re.IGNORECASE)
+                title = title_match.group(1) if title_match else url
+                
+                desc_match = re.search(r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+                description = desc_match.group(1) if desc_match else ""
+                
+                # Ищем og:image
+                og_image_match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+                
+                thumbnail = None
+                if og_image_match:
+                    image_url = og_image_match.group(1)
+                    # Загружаем изображение
+                    try:
+                        image_url = validate_outbound_url(image_url)
+                        async with session.get(image_url, timeout=5) as img_response:
+                            if img_response.status == 200:
+                                img_data = await img_response.read()
+                                mime_type = img_response.headers.get('Content-Type', 'image/jpeg')
+                                thumbnail = ImageData(data=img_data, mime_type=mime_type)
+                    except UnsafeURLError:
+                        pass
+                    except Exception:
+                        pass
+                
+                return LinkCard(
+                    url=url,
+                    title=title[:100],  # Ограничиваем длину
+                    description=description[:300],
+                    thumbnail=thumbnail
+                )
                     
         except Exception as e:
             logger.error(f"❌ Ошибка получения метаданных для {url}: {e}")
@@ -239,25 +287,25 @@ class BlueskyRichPostCreator:
         """Создает пост-галерею из URL изображений"""
         images = []
         
-        async with aiohttp.ClientSession() as session:
-            for i, url in enumerate(image_urls[:4]):
-                try:
-                    url = validate_outbound_url(url)
-                    async with session.get(url, timeout=10) as response:
-                        if response.status == 200:
-                            data = await response.read()
-                            mime_type = response.headers.get('Content-Type', 'image/jpeg')
-                            alt_text = alt_texts[i] if alt_texts and i < len(alt_texts) else None
-                            
-                            images.append(ImageData(
-                                data=data,
-                                mime_type=mime_type,
-                                alt_text=alt_text
-                            ))
-                except UnsafeURLError as e:
-                    logger.warning(f"⚠️ Unsafe image URL rejected: {e}")
-                except Exception as e:
-                    logger.error(f"❌ Ошибка загрузки изображения {url}: {e}")
+        session = await self.get_session()
+        for i, url in enumerate(image_urls[:4]):
+            try:
+                url = validate_outbound_url(url)
+                async with session.get(url, timeout=10) as response:
+                    if response.status == 200:
+                        data = await response.read()
+                        mime_type = response.headers.get('Content-Type', 'image/jpeg')
+                        alt_text = alt_texts[i] if alt_texts and i < len(alt_texts) else None
+                        
+                        images.append(ImageData(
+                            data=data,
+                            mime_type=mime_type,
+                            alt_text=alt_text
+                        ))
+            except UnsafeURLError as e:
+                logger.warning(f"⚠️ Unsafe image URL rejected: {e}")
+            except Exception as e:
+                logger.error(f"❌ Ошибка загрузки изображения {url}: {e}")
         
         return await self.create_post_with_images(caption, images, content_type='art')
     

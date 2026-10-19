@@ -96,17 +96,51 @@ from quality_pipeline import (
     regenerate_until_quality,
 )
 from url_safety import UnsafeURLError, validate_outbound_url
+from strategies.dynamic_posts import (
+    PERSONAL_OPINION_STRATEGY_NAME,
+    QUALITY_DISCUSSION_STRATEGY_NAME,
+    QUALITY_TIP_STRATEGY_NAME,
+    PersonalOpinionStrategy,
+    QualityDiscussionStrategy,
+    QualityTipStrategy,
+)
+from strategies.image_post import ImagePostHelper, ThemePostHelper
+from strategies.insight_posts import (
+    PERSONAL_INSIGHT_STRATEGY_NAME,
+    PREDICTION_STRATEGY_NAME,
+    PersonalInsightStrategy,
+    PredictionStrategy,
+)
+from strategies.poll_post import (
+    STRATEGY_NAME as POLL_STRATEGY_NAME,
+    QualityPollStrategy,
+)
 from strategies.ports import (
     CallableDuplicateContent,
+    CallableDynamicContent,
     CallableFallbackPost,
+    CallableImageGenerator,
+    CallableImagePrompt,
+    CallableImageUpload,
     CallableLinkPreview,
+    CallablePollFactory,
     CallablePostFactory,
     CallableRssHeadlines,
     CallableStructuredContent,
+    DynamicPostsPorts,
+    ImagePostPorts,
     LiveRssFeeds,
     NewsStrategyPorts,
+    PollStrategyPorts,
+    ThemePostPorts,
 )
 from strategies.quality_news import STRATEGY_NAME, QualityNewsStrategy
+from strategies.theme_posts import (
+    AI_INSIGHT_STRATEGY_NAME,
+    LIST_STRATEGY_NAME,
+    QualityAiInsightStrategy,
+    QualityListStrategy,
+)
 
 # Настройка логирования с абсолютным путем
 import sys
@@ -343,8 +377,15 @@ class AutonomousBlueskyBotV2:
                 logger.warning(f"OpenAI backup unavailable: {e}")
         
         # Инициализация форматировщиков с передачей клиента для резолва DID
-        self.formatter = BlueskyPostFormatter(client=self.bluesky_client)
-        self.rich_creator = BlueskyRichPostCreator(self.bluesky_client)
+        self.formatter = BlueskyPostFormatter(
+            client=self.bluesky_client,
+            http_session=self.http_session,
+        )
+        self.rich_creator = BlueskyRichPostCreator(
+            self.bluesky_client,
+            http_session=self.http_session,
+        )
+        self._inject_http_session_into_adapters()
         
         # НОВОЕ: Проверка соблюдения правил BlueSky
         if BLUESKY_COMPLIANT_MODE:
@@ -534,6 +575,39 @@ class AutonomousBlueskyBotV2:
         self.quality_news_strategy = QualityNewsStrategy(
             self._build_news_strategy_ports()
         )
+        # Shared image/theme helpers (STRAT-004) for upcoming strategy families
+        self._image_post_ports = self._build_image_post_ports()
+        self.image_post_helper = ImagePostHelper(self._image_post_ports)
+        self._theme_post_ports = ThemePostPorts(
+            content=CallableStructuredContent(
+                self.generate_structured_post_content
+            ),
+            image=self._image_post_ports,
+        )
+        self.theme_post_helper = ThemePostHelper(self._theme_post_ports)
+        # Theme family (STRAT-006): ai_insight + list via ThemePostHelper
+        self.quality_ai_insight_strategy = QualityAiInsightStrategy(
+            self.theme_post_helper
+        )
+        self.quality_list_strategy = QualityListStrategy(self.theme_post_helper)
+        # Dynamic family (STRAT-005); registry prefers instances
+        self._dynamic_posts_ports = self._build_dynamic_posts_ports()
+        self.personal_opinion_strategy = PersonalOpinionStrategy(
+            self._dynamic_posts_ports
+        )
+        self.quality_tip_strategy = QualityTipStrategy(self._dynamic_posts_ports)
+        self.quality_discussion_strategy = QualityDiscussionStrategy(
+            self._dynamic_posts_ports
+        )
+        # Insight + prediction (STRAT-008); registry prefers instances
+        self.personal_insight_strategy = PersonalInsightStrategy(
+            self._theme_post_ports
+        )
+        self.prediction_strategy = PredictionStrategy(self._theme_post_ports)
+        # Poll family (STRAT-007); registry prefers instance over bound method
+        self.quality_poll_strategy = QualityPollStrategy(
+            self._build_poll_strategy_ports()
+        )
         # Hybrid registry: extracted strategies + bound methods for the rest.
         self.post_strategy_registry = self._build_post_strategy_registry()
         if self.dry_run:
@@ -553,6 +627,35 @@ class AutonomousBlueskyBotV2:
             posts=CallablePostFactory(self.formatter.create_post),
             link_preview=CallableLinkPreview(self.create_post_with_link_preview),
             fallback=CallableFallbackPost(self._create_personal_opinion_post),
+        )
+
+    def _build_image_post_ports(self) -> ImagePostPorts:
+        """Composition-root wiring: bot attrs → ImagePostPorts (STRAT-004)."""
+        return ImagePostPorts(
+            posts=CallablePostFactory(self.formatter.create_post),
+            image_prompt=CallableImagePrompt(self.create_image_prompt_from_text),
+            image_gen=CallableImageGenerator(
+                self.pollinations_ai.generate_image_data
+            ),
+            image_upload=CallableImageUpload(self.upload_image_data_to_bluesky),
+        )
+
+    def _build_dynamic_posts_ports(self) -> DynamicPostsPorts:
+        """Composition-root wiring: bot attrs → DynamicPostsPorts (STRAT-005)."""
+        return DynamicPostsPorts(
+            dynamic=CallableDynamicContent(
+                self.dynamic_generator.generate_dynamic_content,
+                self.dynamic_generator._generate_fallback_content,
+            ),
+            image=self._image_post_ports,
+            emergency=CallableFallbackPost(self._create_emergency_unique_post),
+        )
+
+    def _build_poll_strategy_ports(self) -> PollStrategyPorts:
+        """Composition-root wiring: bot attrs → PollStrategyPorts (STRAT-007)."""
+        return PollStrategyPorts(
+            content=CallableStructuredContent(self.generate_structured_post_content),
+            poll=CallablePollFactory(self.formatter.create_poll),
         )
 
     def _build_content_ports(self) -> ContentPorts:
@@ -589,6 +692,25 @@ class AutonomousBlueskyBotV2:
             if STRATEGY_NAME not in registered:
                 registered = list(registered) + [STRATEGY_NAME]
                 missing = [n for n in missing if n != STRATEGY_NAME]
+
+        # STRAT-005..008: dynamic / theme / poll / insight / prediction.
+        extracted_overwrites = (
+            (PERSONAL_OPINION_STRATEGY_NAME, self.personal_opinion_strategy),
+            (QUALITY_TIP_STRATEGY_NAME, self.quality_tip_strategy),
+            (QUALITY_DISCUSSION_STRATEGY_NAME, self.quality_discussion_strategy),
+            (AI_INSIGHT_STRATEGY_NAME, self.quality_ai_insight_strategy),
+            (LIST_STRATEGY_NAME, self.quality_list_strategy),
+            (POLL_STRATEGY_NAME, self.quality_poll_strategy),
+            (PERSONAL_INSIGHT_STRATEGY_NAME, self.personal_insight_strategy),
+            (PREDICTION_STRATEGY_NAME, self.prediction_strategy),
+        )
+        for name, strategy in extracted_overwrites:
+            if name not in names:
+                continue
+            registry.register(name, strategy, overwrite=True)
+            if name not in registered:
+                registered = list(registered) + [name]
+                missing = [n for n in missing if n != name]
 
         if missing:
             logger.warning(
@@ -627,6 +749,7 @@ class AutonomousBlueskyBotV2:
                 _recent_repost_authors=lambda: self.recent_repost_authors,
             ),
             config=LiveEngagementConfig(_get_config=lambda: self.config),
+            retry=self.retry_atproto,
         )
 
     def load_external_config(self, config_file='bot_config.json'):
@@ -683,13 +806,19 @@ class AutonomousBlueskyBotV2:
         return self.http_session
 
     def _inject_http_session_into_adapters(self) -> None:
-        """Push live shared ClientSession into AI / RSS consumers (bot owns lifecycle)."""
+        """Push live shared ClientSession into AI / RSS / formatter consumers (bot owns lifecycle)."""
         ai = getattr(self, 'pollinations_ai', None)
         if ai is not None and hasattr(ai, 'set_http_session'):
             ai.set_http_session(self.http_session)
         rss = getattr(self, 'rss_manager', None)
         if rss is not None:
             rss.http_session = self.http_session
+        formatter = getattr(self, 'formatter', None)
+        if formatter is not None and hasattr(formatter, 'set_http_session'):
+            formatter.set_http_session(self.http_session)
+        rich = getattr(self, 'rich_creator', None)
+        if rich is not None and hasattr(rich, 'set_http_session'):
+            rich.set_http_session(self.http_session)
 
     async def _http_get_text_with_retry(self, url: str, timeout: float = 15) -> tuple[int, str]:
         """Shared-session HTTP GET with ``retry_rss_http`` (RETRY-002 RSS path).
@@ -712,6 +841,14 @@ class AutonomousBlueskyBotV2:
                 raise TimeoutError(f"HTTP GET timed out for {url}") from e
 
         return await self.retry_rss_http.execute(_once)
+
+    async def _atproto_execute(self, fn, *args, **kwargs):
+        """ATProto read/write via ``retry_atproto`` (RETRY-003). Bounded; CLIENT no-retry."""
+        return await self.retry_atproto.execute(fn, *args, **kwargs)
+
+    async def _media_upload_execute(self, fn, *args, **kwargs):
+        """Image download / ``upload_blob`` via ``retry_media_upload`` (RETRY-003)."""
+        return await self.retry_media_upload.execute(fn, *args, **kwargs)
 
     def _is_posting_window(self) -> bool:
         """Check scheduling config (quiet_hours / active_windows).
@@ -1132,7 +1269,10 @@ class AutonomousBlueskyBotV2:
         )
 
     async def authenticate(self, force_login: bool = False) -> bool:
-        """Session-first auth: restore persisted session, fallback to login."""
+        """Session-first auth: restore persisted session, fallback to login.
+
+        Login uses ``retry_atproto`` (RETRY-003) — bounded retries; CLIENT short-circuits.
+        """
         await self._ensure_http_session()
 
         # --- Phase 1: try restoring a persisted session ---
@@ -1140,7 +1280,9 @@ class AutonomousBlueskyBotV2:
             saved = self.session_store.load()
             if saved:
                 try:
-                    profile = await self.bluesky_client.login(session_string=saved)
+                    profile = await self._atproto_execute(
+                        self.bluesky_client.login, session_string=saved
+                    )
                     self.authenticated = True
                     self._persist_session()
                     logger.info(f"✅ Сессия восстановлена для {getattr(profile, 'handle', self.handle)}")
@@ -1149,30 +1291,19 @@ class AutonomousBlueskyBotV2:
                     logger.warning(f"⚠️ Не удалось восстановить сессию: {e}. Переход к login.")
                     self.session_store.clear()
 
-        # --- Phase 2: full login with retry ---
-        max_retries = 3
-        base_delay = 60
-
-        for attempt in range(max_retries):
-            try:
-                await self.bluesky_client.login(self.handle, self.password)
-                self.authenticated = True
-                self._persist_session()
-                logger.info(f"✅ Успешная авторизация: {self.handle}")
-                return True
-            except Exception as e:
-                ec = classify_error(e)
-                if ec == ErrorClass.RATE_LIMIT:
-                    delay = base_delay * (2 ** attempt)
-                    logger.warning(f"⚠️ Rate limit. Попытка {attempt + 1}/{max_retries}, backoff {delay}s")
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(delay)
-                        continue
-                    logger.error("❌ Достигнуто макс. кол-во попыток авторизации (rate limit)")
-                    return False
-                logger.error(f"❌ Ошибка авторизации ({ec.value}): {e}")
-                return False
-        return False
+        # --- Phase 2: full login via RetryPolicy (no ad-hoc sleep loop) ---
+        try:
+            await self._atproto_execute(
+                self.bluesky_client.login, self.handle, self.password
+            )
+            self.authenticated = True
+            self._persist_session()
+            logger.info(f"✅ Успешная авторизация: {self.handle}")
+            return True
+        except Exception as e:
+            ec = classify_error(e)
+            logger.error(f"❌ Ошибка авторизации ({ec.value}): {e}")
+            return False
 
     def _persist_session(self) -> None:
         try:
@@ -1308,11 +1439,12 @@ class AutonomousBlueskyBotV2:
                     self.dry_run_log.log('send_post', text=post.text[:120], format=getattr(self, '_last_ab_format', 'unknown'))
                     return
 
-                created = await self.bluesky_client.send_post(
+                created = await self._atproto_execute(
+                    self.bluesky_client.send_post,
                     text=post.text,
                     facets=post.facets if post.facets else None,
                     embed=post.embed if hasattr(post, 'embed') and post.embed else None,
-                    langs=post.langs if hasattr(post, 'langs') and post.langs else ['en']
+                    langs=post.langs if hasattr(post, 'langs') and post.langs else ['en'],
                 )
                 self.activity_budget.spend('post')
                 
@@ -1523,34 +1655,8 @@ class AutonomousBlueskyBotV2:
         return await self.quality_news_strategy.create()
 
     async def _create_personal_opinion_post(self) -> RichTextPost:
-        """Создает пост с личным мнением используя динамическую систему"""
-        try:
-            # Генерируем динамический контент
-            dynamic_content = await self.dynamic_generator.generate_dynamic_content()
-            
-            async def content_creator():
-                return {
-                    "post_text": dynamic_content["post_text"],
-                    "hashtags": dynamic_content["hashtags"]
-                }
-
-            async def fallback_creator():
-                fallback = self.dynamic_generator._generate_fallback_content()
-                return {
-                    "post_text": fallback["post_text"], 
-                    "hashtags": fallback["hashtags"]
-                }
-
-            return await self._create_post_with_image_generation(
-                content_creator,
-                dynamic_content.get("topic", "personal thoughts"),
-                dynamic_content.get("content_type", "personal"),
-                fallback_creator
-            )
-            
-        except Exception as e:
-            logger.error(f"❌ Error in dynamic personal opinion post: {e}")
-            return await self._create_emergency_unique_post()
+        """Личное мнение (делегирует в PersonalOpinionStrategy / STRAT-005)."""
+        return await self.personal_opinion_strategy.create()
     
     async def _quality_theme_post(
         self,
@@ -1562,249 +1668,47 @@ class AutonomousBlueskyBotV2:
         build_fallback: Callable[[str], Dict[str, str]],
         image_topic: Optional[Callable[[str], str]] = None,
     ) -> RichTextPost:
-        """Shared theme strategy: pick theme → structured AI → fallback → image post."""
-        selected_theme = random.choice(themes)
-
-        async def content_creator():
-            return await self.generate_structured_post_content(
-                build_prompt(selected_theme),
-                model_key=model_key,
-            )
-
-        async def fallback_creator():
-            return build_fallback(selected_theme)
-
-        topic = image_topic(selected_theme) if image_topic else selected_theme
-        return await self._create_post_with_image_generation(
-            content_creator,
-            topic,
-            content_type,
-            fallback_creator,
+        """Shared theme strategy (delegates to ThemePostHelper / STRAT-004)."""
+        return await self.theme_post_helper.create(
+            themes,
+            build_prompt=build_prompt,
+            content_type=content_type,
+            model_key=model_key,
+            build_fallback=build_fallback,
+            image_topic=image_topic,
         )
 
     async def _create_quality_ai_insight(self) -> RichTextPost:
-        """Создает пост об AI с динамическими хештегами и изображением"""
-        ai_aspects = [
-            "использование AI в повседневной работе",
-            "изменения в подходах к программированию",
-            "взаимодействие человека и машины",
-            "эволюция творческих процессов",
-            "влияние на профессиональные навыки"
-        ]
+        """Создает пост об AI (делегирует в QualityAiInsightStrategy / STRAT-006).
 
-        def build_prompt(selected_aspect: str) -> str:
-            return f"""
-            Create a thoughtful social media post about "{selected_aspect}".
-            Provide the output in JSON format with two keys: "post_text" (in English, 180-220 characters, personal and engaging - can end with a question, statement, observation, or emoji) and "hashtags" (in English, 3-4 relevant tags, starting with #).
-
-            Examples:
-            {{
-              "post_text": "AI assistants are changing how I approach coding. I'm definitely becoming more efficient, not sure about creativity yet 🤔",
-              "hashtags": "#AI #coding #futureofwork #thoughts"
-            }}
-            {{
-              "post_text": "Been using AI for brainstorming lately. It's like having a tireless creative partner that never judges your weird ideas ✨",
-              "hashtags": "#AI #creativity #productivity #tools"
-            }}
-            {{
-              "post_text": "The human-AI collaboration feels so natural now. We're not replacing humans, we're augmenting them. That's the real revolution.",
-              "hashtags": "#AI #future #collaboration #tech"
-            }}
-            """
-
-        def build_fallback(_selected_aspect: str) -> Dict[str, str]:
-            current_time = datetime.now().strftime("%H:%M")
-            fallback_options = [
-                {
-                    "post_text": f"🤖 AI thoughts ({current_time}):\n\nArtificial intelligence is reshaping our work. The possibilities are endless! ✨",
-                    "hashtags": "#AI #future #technology"
-                },
-                {
-                    "post_text": f"💭 Tech reflection ({current_time}):\n\nEvery tool we use shapes how we think. AI is no exception.",
-                    "hashtags": "#AI #productivity #mindset"
-                },
-                {
-                    "post_text": f"🔬 Daily observation ({current_time}):\n\nWatching AI evolve is like witnessing the birth of a new species.",
-                    "hashtags": "#AI #evolution #technology"
-                }
-            ]
-            return random.choice(fallback_options)
-
-        return await self._quality_theme_post(
-            ai_aspects,
-            build_prompt=build_prompt,
-            content_type='ai',
-            model_key='powerful',
-            build_fallback=build_fallback,
-        )
+        Registry prefers ``self.quality_ai_insight_strategy`` under
+        ``AI_INSIGHT_STRATEGY_NAME``; this method remains for direct callers.
+        """
+        return await self.quality_ai_insight_strategy.create()
     
     async def _create_quality_tip_post(self) -> RichTextPost:
-        """Создает пост-совет используя динамическую систему"""
-        try:
-            # Генерируем контент с фокусом на советы
-            dynamic_content = await self.dynamic_generator.generate_dynamic_content("tip_sharing")
-            
-            async def content_creator():
-                return {
-                    "post_text": dynamic_content["post_text"],
-                    "hashtags": dynamic_content["hashtags"]
-                }
-
-            async def fallback_creator():
-                fallback = self.dynamic_generator._generate_fallback_content()
-                return {
-                    "post_text": fallback["post_text"],
-                    "hashtags": fallback["hashtags"]
-                }
-
-            return await self._create_post_with_image_generation(
-                content_creator,
-                dynamic_content.get("topic", "useful tips"),
-                dynamic_content.get("content_type", "tip"),
-                fallback_creator
-            )
-            
-        except Exception as e:
-            logger.error(f"❌ Error in dynamic tip post: {e}")
-            return await self._create_emergency_unique_post()
+        """Совет (делегирует в QualityTipStrategy / STRAT-005)."""
+        return await self.quality_tip_strategy.create()
     
     async def _create_quality_list_post(self) -> RichTextPost:
-        """ОТРЕФАКТОРЕНО: Создает пост-список используя единый паттерн с изображением"""
-        list_themes = [
-            "полезные инструменты для разработчиков",
-            "тренды в программировании", 
-            "книги для IT-специалистов",
-            "лайфхаки продуктивности",
-            "ресурсы для изучения технологий",
-            "ошибки начинающих программистов",
-            "принципы хорошего кода",
-            "навыки для карьерного роста",
-            "языки программирования для изучения",
-            "инструменты командной работы"
-        ]
+        """Создает пост-список (делегирует в QualityListStrategy / STRAT-006).
 
-        def build_prompt(selected_theme: str) -> str:
-            return f"""
-            Create a social media post based on the list idea: "{selected_theme}".
-            Provide the output in JSON format. The "post_text" (in English, max 280 chars) should have a title, a short numbered list, and a natural ending (statement, emoji, question, or observation). The "hashtags" (in English) should be 3-4 relevant tags.
-
-            Examples for "useful dev tools":
-            {{
-              "post_text": "🔥 TOP-3 tools for code\\n\\n1️⃣ VS Code - best editor\\n2️⃣ Git - version control\\n3️⃣ Postman - API testing\\n\\nGame changers for productivity! 🚀",
-              "hashtags": "#tools #development #useful #coding"
-            }}
-            {{
-              "post_text": "📚 Must-read books for developers:\\n\\n1️⃣ Clean Code\\n2️⃣ Design Patterns\\n3️⃣ Pragmatic Programmer\\n\\nClassics never get old ✨",
-              "hashtags": "#books #learning #development #career"
-            }}
-            """
-
-        def build_fallback(_selected_theme: str) -> Dict[str, str]:
-            current_time = datetime.now().strftime("%H:%M")
-            fallback_options = [
-                {
-                    "post_text": f"📋 Daily developer routine ({current_time}):\\n\\n1. Write code\\n2. Drink coffee\\n3. Debug\\n4. Repeat\\n\\nThe eternal cycle! ☕",
-                    "hashtags": "#list #productivity #dev #coding"
-                },
-                {
-                    "post_text": f"🔧 Essential tools ({current_time}):\\n\\n1. Good IDE\\n2. Version control\\n3. Stack Overflow\\n\\nBasics that never fail 💪",
-                    "hashtags": "#tools #development #basics #tech"
-                },
-                {
-                    "post_text": f"💡 Simple truths ({current_time}):\\n\\n1. Code works mysteriously\\n2. Bugs appear from nowhere\\n3. Coffee fixes everything\\n\\nSoftware development reality 😅",
-                    "hashtags": "#humor #coding #life #truth"
-                }
-            ]
-            return random.choice(fallback_options)
-
-        return await self._quality_theme_post(
-            list_themes,
-            build_prompt=build_prompt,
-            content_type='list',
-            model_key='creative',
-            build_fallback=build_fallback,
-        )
+        Registry prefers ``self.quality_list_strategy`` under
+        ``LIST_STRATEGY_NAME``; this method remains for direct callers.
+        """
+        return await self.quality_list_strategy.create()
     
     async def _create_quality_poll_post(self) -> RichTextPost:
-        """Создает пост-опрос с динамическими хештегами и изображением"""
-        poll_topics = [
-            ("tabs vs spaces", ["Табы", "Пробелы"]),
-            ("light vs dark theme", ["Светлая тема", "Темная тема"]),
-            ("framework choice: React vs Vue", ["React", "Vue"]),
-            ("preferred OS: Windows vs Linux", ["Windows", "Linux"])
-        ]
-        selected_topic, poll_options = random.choice(poll_topics)
+        """Создает пост-опрос (делегирует в QualityPollStrategy).
 
-        async def content_creator():
-            ai_prompt = f"""
-            Create a poll post about "{selected_topic}".
-            Provide the output in JSON format. "post_text" (in English, ~150 chars) should introduce the poll. "hashtags" should be 3-4 relevant tags. The poll options will be added separately.
-
-            Example for "tabs vs spaces":
-            {{
-              "post_text": "Вечный бой, который не утихает... Что выбираете вы для форматирования кода? Голосуйте! 💻",
-              "hashtags": "#холивар #код #программирование #опрос"
-            }}
-            """
-            return await self.generate_structured_post_content(ai_prompt, model_key='creative')
-        
-        # Для опросов fallback не так важен, т.к. основной контент - сам опрос.
-        # Но создадим его для консистентности.
-        async def fallback_creator():
-            return {
-                "post_text": "Время для вашего мнения! Что вы думаете по этому поводу?",
-                "hashtags": "#опрос #мнение #IT"
-            }
-
-        # Эта обертка не поддерживает опросы, поэтому логика будет немного другой.
-        structured_content = await content_creator()
-        if not structured_content:
-            structured_content = await fallback_creator()
-
-        post_text = structured_content.get('post_text', '')
-        hashtags = structured_content.get('hashtags', '')
-        final_post_text = f"{post_text}\n\n{hashtags}".strip()
-
-        logger.info(f"📊 Создание опроса на тему: {selected_topic}")
-        # Используем formatter напрямую для создания опроса
-        return self.formatter.create_poll(
-            question=final_post_text,
-            options=poll_options,
-            duration_hours=24,
-            content_type='poll'
-        )
+        Registry (STRAT-007) prefers ``self.quality_poll_strategy`` under
+        ``POLL_STRATEGY_NAME``; this method remains for direct / getattr callers.
+        """
+        return await self.quality_poll_strategy.create()
     
     async def _create_quality_discussion(self) -> RichTextPost:
-        """Создает пост для дискуссии используя динамическую систему"""
-        try:
-            # Генерируем контент с фокусом на вопросы и наблюдения
-            import random
-            content_type = "question_starter" if random.random() < 0.3 else "observation"  # Снижаем долю вопросов с 60% до 30%
-            dynamic_content = await self.dynamic_generator.generate_dynamic_content(content_type)
-            
-            async def content_creator():
-                return {
-                    "post_text": dynamic_content["post_text"],
-                    "hashtags": dynamic_content["hashtags"]
-                }
-
-            async def fallback_creator():
-                fallback = self.dynamic_generator._generate_fallback_content()
-                return {
-                    "post_text": fallback["post_text"],
-                    "hashtags": fallback["hashtags"]
-                }
-
-            return await self._create_post_with_image_generation(
-                content_creator,
-                dynamic_content.get("topic", "discussion topic"),
-                dynamic_content.get("content_type", "discussion"),
-                fallback_creator
-            )
-            
-        except Exception as e:
-            logger.error(f"❌ Error in dynamic discussion post: {e}")
-            return await self._create_emergency_unique_post()
+        """Дискуссия (делегирует в QualityDiscussionStrategy / STRAT-005)."""
+        return await self.quality_discussion_strategy.create()
     
     # НОВЫЕ МЕТОДЫ ДЛЯ ВИРУСНОГО КОНТЕНТА
     
@@ -1890,92 +1794,12 @@ class AutonomousBlueskyBotV2:
         )
     
     async def _create_personal_insight(self) -> RichTextPost:
-        """Создает пост с личным инсайтом или опытом"""
-        insight_areas = [
-            "biggest career mistake", "counterintuitive business lesson",
-            "overlooked skill for success", "industry secret nobody talks about",
-            "expensive lesson learned", "myth everyone believes",
-            "pattern in successful people", "red flag in startups",
-            "undervalued technology", "overrated trend"
-        ]
-        
-        selected_area = random.choice(insight_areas)
-        
-        async def content_creator():
-            ai_prompt = f"""
-            Create a personal insight post about: "{selected_area}"
-            
-            Requirements:
-            - Share authentic personal experience or observation
-            - Include specific example or story
-            - Provide actionable takeaway
-            - Use vulnerable, honest tone
-            - End with relatable question
-            - 220-280 characters
-            - Feel authentic and human
-            
-            Format as JSON: {{"post_text": "...", "hashtags": "..."}}
-            
-            Style: "After [X years/experience], I learned that {selected_area} is... [personal story/insight]. Wish someone told me this earlier. Anyone else experienced this? 💭"
-            """
-            return await self.generate_structured_post_content(ai_prompt, model_key='creative')
+        """Personal insight post (delegates to PersonalInsightStrategy / STRAT-008)."""
+        return await self.personal_insight_strategy.create()
 
-        async def fallback_creator():
-            return {
-                "post_text": f"💭 Personal insight: {selected_area} taught me more about business than any book. Here's what I learned... What's your experience?",
-                "hashtags": "#insight #experience #lessons #personal"
-            }
-
-        return await self._create_post_with_image_generation(
-            content_creator,
-            f"personal insight about {selected_area}",
-            'personal_insight',
-            fallback_creator
-        )
-    
     async def _create_prediction_post(self) -> RichTextPost:
-        """Создает пост с смелым прогнозом"""
-        prediction_areas = [
-            "AI development in 2025", "remote work evolution",
-            "crypto market direction", "tech industry consolidation",
-            "programming languages future", "startup ecosystem changes",
-            "social media platform wars", "economic tech impact",
-            "cybersecurity threats", "developer tools evolution"
-        ]
-        
-        selected_area = random.choice(prediction_areas)
-        
-        async def content_creator():
-            ai_prompt = f"""
-            Create a bold prediction post about: "{selected_area}"
-            
-            Requirements:
-            - Make specific, bold prediction
-            - Provide reasoning and evidence
-            - Set timeline (6 months, 1 year, 2 years)
-            - Include potential consequences
-            - Ask for counter-arguments
-            - 250-280 characters
-            - Use confident, analytical tone
-            
-            Format as JSON: {{"post_text": "...", "hashtags": "..."}}
-            
-            Style: "Prediction: By [timeline], {selected_area} will... [specific prediction]. Here's why: [reasoning]. This means [consequences]. Prove me wrong! 🔮"
-            """
-            return await self.generate_structured_post_content(ai_prompt, model_key='powerful')
-
-        async def fallback_creator():
-            return {
-                "post_text": f"🔮 Bold prediction: {selected_area} will surprise everyone in 2025. Here's my reasoning... What do you think?",
-                "hashtags": "#prediction #future #tech #analysis"
-            }
-
-        return await self._create_post_with_image_generation(
-            content_creator,
-            f"future prediction about {selected_area}",
-            'prediction',
-            fallback_creator
-        )
+        """Bold prediction post (delegates to PredictionStrategy / STRAT-008)."""
+        return await self.prediction_strategy.create()
     
     async def create_manual_thread(self, topic: str) -> None:
         """Создание thread только по специальному запросу (НЕ автоматически)"""
@@ -2466,7 +2290,9 @@ class AutonomousBlueskyBotV2:
             feed_items = []
             cursor = None
             for _ in range(max_pages):
-                timeline_page = await self.bluesky_client.get_timeline(limit=page_limit, cursor=cursor)
+                timeline_page = await self._atproto_execute(
+                    self.bluesky_client.get_timeline, limit=page_limit, cursor=cursor
+                )
                 page_feed = getattr(timeline_page, 'feed', []) or []
                 feed_items.extend(page_feed)
                 cursor = getattr(timeline_page, 'cursor', None)
@@ -2717,19 +2543,20 @@ class AutonomousBlueskyBotV2:
             logger.info(f"💬 Комментирование поста от {author_handle}")
             logger.info(f"    Комментарий: {formatted_comment.text}")
             
-            await self.bluesky_client.send_post(
+            await self._atproto_execute(
+                self.bluesky_client.send_post,
                 text=formatted_comment.text,
                 facets=formatted_comment.facets,
                 reply_to=models.AppBskyFeedPost.ReplyRef(
                     root=models.ComAtprotoRepoStrongRef.Main(
-                        uri=post.post.uri, 
+                        uri=post.post.uri,
                         cid=post.post.cid
                     ),
                     parent=models.ComAtprotoRepoStrongRef.Main(
-                        uri=post.post.uri, 
+                        uri=post.post.uri,
                         cid=post.post.cid
                     )
-                )
+                ),
             )
             
             self.session_stats['comments_made'] += 1
@@ -2974,8 +2801,10 @@ class AutonomousBlueskyBotV2:
     async def analyze_post_performance(self, post_uri: str) -> Dict:
         """УЛУЧШЕННЫЙ анализ эффективности поста с детальным логированием"""
         try:
-            # Получаем информацию о посте
-            post_info = await self.bluesky_client.get_post_thread(uri=post_uri)
+            # Получаем информацию о посте (RETRY-003)
+            post_info = await self._atproto_execute(
+                self.bluesky_client.get_post_thread, uri=post_uri
+            )
             
             engagement = {
                 'likes': post_info.thread.post.like_count or 0,
@@ -3255,7 +3084,12 @@ class AutonomousBlueskyBotV2:
     async def _follow_from_suggestions(self) -> int:
         """Подписки на основе рекомендаций BlueSky"""
         try:
-            suggestions = await self.bluesky_client.app.bsky.actor.get_suggestions(params={'limit': 30})
+            async def _get_suggestions():
+                return await self.bluesky_client.app.bsky.actor.get_suggestions(
+                    params={'limit': 30}
+                )
+
+            suggestions = await self._atproto_execute(_get_suggestions)
             logger.info(f"👥 Получено {len(suggestions.actors)} рекомендаций пользователей")
             
             followed = 0
@@ -3270,7 +3104,12 @@ class AutonomousBlueskyBotV2:
                 
                 try:
                     # Получаем полный профиль пользователя для доступа к статистике
-                    full_profile = await self.bluesky_client.app.bsky.actor.get_profile(params={'actor': actor.did})
+                    async def _get_profile(did=actor.did):
+                        return await self.bluesky_client.app.bsky.actor.get_profile(
+                            params={'actor': did}
+                        )
+
+                    full_profile = await self._atproto_execute(_get_profile)
                     profile = full_profile
                     
                     # Теперь у нас есть доступ к статистике
@@ -3327,7 +3166,9 @@ class AutonomousBlueskyBotV2:
     async def _follow_from_timeline(self) -> int:
         """Подписки на авторов популярных постов из ленты"""
         try:
-            timeline = await self.bluesky_client.get_timeline(limit=30)
+            timeline = await self._atproto_execute(
+                self.bluesky_client.get_timeline, limit=30
+            )
             logger.info(f"📰 Анализ авторов популярных постов из ленты")
             
             followed = 0
@@ -3354,7 +3195,12 @@ class AutonomousBlueskyBotV2:
                 
                 try:
                     # Получаем полный профиль автора для доступа к статистике
-                    full_profile = await self.bluesky_client.app.bsky.actor.get_profile(params={'actor': author.did})
+                    async def _get_author_profile(did=author.did):
+                        return await self.bluesky_client.app.bsky.actor.get_profile(
+                            params={'actor': did}
+                        )
+
+                    full_profile = await self._atproto_execute(_get_author_profile)
                     
                     # Теперь у нас есть доступ к полной статистике
                     description = full_profile.description or ""
@@ -3446,7 +3292,7 @@ class AutonomousBlueskyBotV2:
             logger.error(f"Ошибка обучения: {e}")
 
     async def upload_image_to_bluesky(self, image_url: str) -> Optional[Dict]:
-        """Загружает изображение в BlueSky и возвращает blob"""
+        """Download image + upload_blob via ``retry_media_upload`` (RETRY-003)."""
         try:
             try:
                 image_url = validate_outbound_url(image_url)
@@ -3455,35 +3301,43 @@ class AutonomousBlueskyBotV2:
                 return None
 
             logger.info(f"📸 Загружаю изображение: {image_url}")
-            
-            # Скачиваем изображение используя единую сессию бота
-            await self._ensure_http_session()
 
-            async with self.http_session.get(image_url, timeout=30) as response:
-                    if response.status != 200:
-                        logger.warning(f"⚠️ Не удалось скачать изображение: HTTP {response.status}")
-                        return None
-                    
-                    # Проверяем размер (максимум 1MB для BlueSky)
-                    content_length = response.headers.get('content-length')
-                    if content_length and int(content_length) > 1000000:
-                        logger.warning(f"⚠️ Изображение слишком большое: {content_length} bytes")
-                        return None
-                    
-                    image_data = await response.read()
-                    
-                    # Проверяем тип файла
-                    content_type = response.headers.get('content-type', '')
-                    if not content_type.startswith('image/'):
-                        logger.warning(f"⚠️ Неверный тип файла: {content_type}")
-                        return None
-            
-            # Загружаем через BlueSky API
-            blob_response = await self.bluesky_client.upload_blob(image_data)
-            
+            async def _download_and_upload_once():
+                await self._ensure_http_session()
+                assert self.http_session is not None
+                try:
+                    async with self.http_session.get(image_url, timeout=30) as response:
+                        if response.status == 429:
+                            raise RuntimeError(f"HTTP 429 rate limit downloading {image_url}")
+                        if response.status >= 500:
+                            raise RuntimeError(f"HTTP {response.status} downloading {image_url}")
+                        if response.status != 200:
+                            # Non-retryable client response — surface as CLIENT for short-circuit
+                            raise RuntimeError(
+                                f"HTTP {response.status}: failed to download image {image_url}"
+                            )
+
+                        content_length = response.headers.get('content-length')
+                        if content_length and int(content_length) > 1000000:
+                            raise RuntimeError(
+                                f"HTTP 400: image too large ({content_length} bytes)"
+                            )
+
+                        image_data = await response.read()
+                        content_type = response.headers.get('content-type', '')
+                        if not content_type.startswith('image/'):
+                            raise RuntimeError(
+                                f"HTTP 400: invalid content-type {content_type}"
+                            )
+                except asyncio.TimeoutError as e:
+                    raise TimeoutError(f"Image download timed out for {image_url}") from e
+
+                return await self.bluesky_client.upload_blob(image_data)
+
+            blob_response = await self._media_upload_execute(_download_and_upload_once)
             logger.info(f"✅ Изображение загружено: {blob_response.blob}")
             return blob_response.blob
-            
+
         except Exception as e:
             logger.error(f"❌ Ошибка загрузки изображения: {e}")
             return None
@@ -3589,12 +3443,14 @@ class AutonomousBlueskyBotV2:
         return "Abstract digital art, vibrant colors, lines and shapes, expressive" # Fallback промпт
 
     async def upload_image_data_to_bluesky(self, image_data: bytes) -> Optional[Dict]:
-        """Загрузка изображения в BlueSky из байтов"""
+        """Загрузка изображения в BlueSky из байтов via ``retry_media_upload`` (RETRY-003)."""
         if not image_data:
             logger.warning("⚠️ Попытка загрузить пустые данные изображения.")
             return None
         try:
-            response = await self.bluesky_client.upload_blob(image_data)
+            response = await self._media_upload_execute(
+                self.bluesky_client.upload_blob, image_data
+            )
             logger.info("✅ Изображение успешно загружено в BlueSky")
             return response.blob
         except Exception as e:
@@ -3677,50 +3533,13 @@ class AutonomousBlueskyBotV2:
         content_type: str,
         fallback_func=None
     ) -> RichTextPost:
-        """
-        Обертка для создания поста с генерацией изображения.
-        Теперь работает со структурированным контентом (текст + хештеги).
-        """
-        structured_content = await content_creation_func()
-
-        if not structured_content:
-            logger.warning(f"⚠️ Функция создания контента для '{content_type}' вернула пустой результат.")
-            if fallback_func:
-                fallback_content = await fallback_func()
-                if isinstance(fallback_content, dict):
-                    post_text = fallback_content.get('post_text', '')
-                    hashtags = fallback_content.get('hashtags', '')
-                    final_post_text = f"{post_text}\n\n{hashtags}".strip()
-                    return self.formatter.create_post(final_post_text, content_type=content_type)
-                if isinstance(fallback_content, str):
-                    return self.formatter.create_post(fallback_content, content_type=content_type)
-                return fallback_content
-            return None
-        
-        post_text = structured_content.get('post_text', '')
-        hashtags = structured_content.get('hashtags', '')
-        final_post_text = f"{post_text}\n\n{hashtags}".strip()
-
-        # ... (логика генерации изображения и публикации остается прежней)
-        # ... (но использует `final_post_text` вместо `post_text_content`)
-        
-        image_prompt = await self.create_image_prompt_from_text(image_prompt_text)
-        image_data = await self.pollinations_ai.generate_image_data(image_prompt)
-
-        if image_data:
-            logger.info(f"✅ Изображение для поста типа '{content_type}' сгенерировано.")
-            image_blob = await self.upload_image_data_to_bluesky(image_data)
-            if image_blob:
-                alt_text = f"Арт-иллюстрация на тему: {image_prompt_text[:80]}..."
-                return self.formatter.create_post(
-                    final_post_text, 
-                    content_type=content_type, 
-                    image_blob=image_blob, 
-                    image_alt_text=alt_text
-                )
-
-        logger.warning(f"⚠️ Не удалось сгенерировать изображение для '{content_type}', публикуем только текст.")
-        return self.formatter.create_post(final_post_text, content_type=content_type)
+        """Create post with image (delegates to ImagePostHelper / STRAT-004)."""
+        return await self.image_post_helper.create(
+            content_creation_func,
+            image_prompt_text,
+            content_type,
+            fallback_func,
+        )
 
 
     async def test_rss_feeds_diagnostics(self) -> Dict[str, any]:

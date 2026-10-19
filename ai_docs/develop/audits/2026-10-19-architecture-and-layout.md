@@ -74,6 +74,20 @@ Expected next-score drivers from the re-audit **completed this cycle** (formal r
 
 Remaining score pressure: God Object LOC, other `_create_*` families, formatter sessions, Phase 7 slices. Report: [2026-10-19-strat003-retry-quality-http-implementation.md](../reports/2026-10-19-strat003-retry-quality-http-implementation.md).
 
+### Delta note (2026-10-19 evening — `orch-2026-10-19-17-34-strat-families`)
+
+Phase 3–6 leftovers from the evening STRAT-003 cycle **closed** (formal re-score still TBD):
+
+| Driver | Status after orch |
+|--------|-------------------|
+| Remaining strategy families (STRAT-004…008) | ✅ Dynamic / theme / poll / insight+prediction extracted; list-fallback newline must-fix fixed |
+| `RetryPolicy` on ATProto / media | ✅ RETRY-003 — Phase 4 outbound retry complete for catalogued I/O |
+| Shared HTTP formatter / rich_posts | ✅ HTTP-002 — Phase 6 complete |
+| Viral + soft-fail helpers | ⬜ Deferred |
+| Phase 7 (scheduler / learning / state) | ⬜ Deferred |
+
+Verify: smoke **2/2**; unittest **246** OK (3 skipped). Report: [2026-10-19-strat-families-http-retry-implementation.md](../reports/2026-10-19-strat-families-http-retry-implementation.md).
+
 ---
 
 ## Layout: baseline hygiene → status

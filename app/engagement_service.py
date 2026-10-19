@@ -47,6 +47,13 @@ class EngagementService:
     def _budget_commit(self, action: str) -> None:
         self._ports.budget.spend(action)
 
+    async def _atproto_write(self, fn, *args, **kwargs):
+        """Run engagement ATProto write via optional RetryPolicy (RETRY-003)."""
+        retry = self._ports.retry
+        if retry is not None:
+            return await retry.execute(fn, *args, **kwargs)
+        return await fn(*args, **kwargs)
+
     async def like(self, uri: str, cid: str, score: float,
                    author_did: Optional[str] = None, author_handle: Optional[str] = None) -> bool:
         ports = self._ports
@@ -60,7 +67,7 @@ class EngagementService:
         if ports.dry_run.enabled:
             ports.dry_run.log('like', uri=uri, score=score)
         else:
-            await ports.client.like(uri, cid)
+            await self._atproto_write(ports.client.like, uri, cid)
         self._budget_commit('like')
         ports.ledger.record(key)
         ports.stats['likes_given'] += 1
@@ -81,7 +88,7 @@ class EngagementService:
         if ports.dry_run.enabled:
             ports.dry_run.log('repost', uri=uri, score=score)
         else:
-            await ports.client.repost(uri, cid)
+            await self._atproto_write(ports.client.repost, uri, cid)
         self._budget_commit('repost')
         ports.ledger.record(key)
         ports.stats['reposts_made'] += 1
@@ -102,7 +109,7 @@ class EngagementService:
         if ports.dry_run.enabled:
             ports.dry_run.log('follow', handle=handle, did=did, source=source or 'suggestions')
         else:
-            await ports.client.follow(did)
+            await self._atproto_write(ports.client.follow, did)
             ports.identity.followed_users.add(did)
         self._budget_commit('follow')
         ports.ledger.record(key)

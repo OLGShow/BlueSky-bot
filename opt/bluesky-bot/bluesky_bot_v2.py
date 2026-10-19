@@ -161,6 +161,20 @@ from strategies.viral_posts import (
 )
 from bot_cycle import BotCycleRunner, CallableBotCyclePorts, TickResult
 from content_publish_state import ContentPublishState
+from daily_reporting import DailyReportingFacade
+from engagement_cache_sync import (
+    hydrate_engagement_caches_from_memory,
+    sync_engagement_caches_to_memory,
+)
+from heartbeat_monitor import HeartbeatMonitor
+from smart_engagement import (
+    CallableRelevance,
+    CallableRepostPolicy,
+    CallableTimelinePage,
+    SmartEngagementConfig,
+    SmartEngagementOrchestrator,
+    SmartEngagementPorts,
+)
 from strategy_learning import apply_strategy_weights_from_outcomes
 
 # Настройка логирования с абсолютным путем
@@ -466,12 +480,13 @@ class AutonomousBlueskyBotV2:
             'errors': 0
         }
         
-        # НОВОЕ: Защита от повторных действий (с восстановлением из памяти)
-        self.commented_posts = set(getattr(self.memory, 'commented_posts_cache', set()))
-        self.recent_comments = getattr(self.memory, 'recent_comments_cache', [])
-        self.liked_posts = set(getattr(self.memory, 'liked_posts_cache', set()))
-        self.reposted_posts = set(getattr(self.memory, 'reposted_posts_cache', set()))
-        self.followed_users = set(getattr(self.memory, 'followed_users_cache', set()))
+        # НОВОЕ: Защита от повторных действий (с восстановлением из памяти / CACHE-001)
+        _hydrated = hydrate_engagement_caches_from_memory(self.memory)
+        self.commented_posts = _hydrated["commented_posts"]
+        self.recent_comments = _hydrated["recent_comments"]
+        self.liked_posts = _hydrated["liked_posts"]
+        self.reposted_posts = _hydrated["reposted_posts"]
+        self.followed_users = _hydrated["followed_users"]
         
         # Кэши
         self.hashtag_cache = {}
@@ -656,14 +671,24 @@ class AutonomousBlueskyBotV2:
         self.duplicate_fallback_helper = DuplicateFallbackHelper(
             self._build_duplicate_fallback_ports()
         )
+        # Phase 7: smart engagement orchestrator (ENG-001)
+        self.smart_engagement_orchestrator = SmartEngagementOrchestrator(
+            self._build_smart_engagement_ports()
+        )
+        # Phase 7: daily report + dry-run flush (DRY-001)
+        self.daily_reporting = DailyReportingFacade(
+            _generate=generate_daily_report,
+            _save=save_daily_report,
+        )
         # Phase 7: one-tick cycle runner (CYCLE-001)
         self.bot_cycle_runner = BotCycleRunner(self._build_bot_cycle_ports())
         if self.dry_run:
             logger.info("🧪 DRY-RUN режим: никакие действия не будут выполнены")
 
-        # Система мониторинга активности (heartbeat)
+        # Система мониторинга активности (heartbeat / HB-001)
+        self.heartbeat_file = "bot_heartbeat.txt"
+        self.heartbeat_monitor = HeartbeatMonitor(self.heartbeat_file)
         self.last_heartbeat = datetime.now()
-        self.heartbeat_file = 'bot_heartbeat.txt'
 
     def _build_news_strategy_ports(self) -> NewsStrategyPorts:
         """Composition-root wiring: bot attrs → NewsStrategyPorts (no strategy→bot)."""
@@ -735,13 +760,15 @@ class AutonomousBlueskyBotV2:
         )
 
     def _sync_duplicate_caches_to_memory(self) -> None:
-        """Persist duplicate-protection caches into BotMemory (CYCLE-001)."""
-        self.memory.commented_posts_cache = self.commented_posts
-        self.memory.recent_comments_cache = self.recent_comments[-20:]
-        self.memory.liked_posts_cache = self.liked_posts
-        self.memory.reposted_posts_cache = self.reposted_posts
-        self.memory.followed_users_cache = self.followed_users
-        self.memory.last_update = datetime.now()
+        """Persist duplicate-protection caches into BotMemory (CACHE-001)."""
+        sync_engagement_caches_to_memory(
+            self.memory,
+            commented_posts=self.commented_posts,
+            recent_comments=self.recent_comments,
+            liked_posts=self.liked_posts,
+            reposted_posts=self.reposted_posts,
+            followed_users=self.followed_users,
+        )
 
     def _rotate_rss_for_cycle(self) -> None:
         """RSS rotation + active URL refresh (CYCLE-001 adapter)."""
@@ -754,12 +781,46 @@ class AutonomousBlueskyBotV2:
         )
 
     def _generate_and_save_daily_report(self) -> None:
-        """Daily report + AB persist + dry-run flush (CYCLE-001 adapter)."""
-        report = generate_daily_report(self.session_stats, self.memory, self.config)
-        save_daily_report(report)
-        self.memory.ab_results = self.ab_engine.results
-        if self.dry_run and self.dry_run_log:
-            self.dry_run_log.save()
+        """Daily report + AB persist + dry-run flush (DRY-001)."""
+        self.daily_reporting.generate_and_save(
+            self.session_stats,
+            self.memory,
+            self.config,
+            ab_results=self.ab_engine.results,
+            dry_run=bool(self.dry_run),
+            dry_run_log=self.dry_run_log,
+        )
+
+    def _build_smart_engagement_ports(self) -> SmartEngagementPorts:
+        """Composition-root wiring for SmartEngagementOrchestrator (ENG-001)."""
+
+        async def _fetch_timeline(*, limit: int, cursor: Optional[str] = None):
+            return await self._atproto_execute(
+                self.bluesky_client.get_timeline, limit=limit, cursor=cursor
+            )
+
+        return SmartEngagementPorts(
+            timeline=CallableTimelinePage(_fetch_timeline),
+            relevance=CallableRelevance(self.calculate_relevance),
+            like=self.engagement_service.like,
+            repost=self.engagement_service.repost,
+            repost_policy=CallableRepostPolicy(self.repost_policy.check),
+            update_relationship=self.update_user_relationship,
+            get_my_did=lambda: (
+                getattr(self.bluesky_client.me, "did", None)
+                if hasattr(self.bluesky_client, "me") and self.bluesky_client.me
+                else None
+            ),
+            reposted_uris=self.reposted_posts,
+            recent_repost_authors=self.recent_repost_authors,
+            set_trend_snippets=lambda snippets: setattr(
+                self, "_trend_timeline_snippets", list(snippets)
+            ),
+            get_session_likes=lambda: int(self.session_stats.get("likes_given", 0)),
+            bump_errors=lambda: self.session_stats.__setitem__(
+                "errors", self.session_stats.get("errors", 0) + 1
+            ),
+        )
 
     def _build_bot_cycle_ports(self) -> CallableBotCyclePorts:
         """Composition-root wiring: bot attrs → BotCyclePorts (CYCLE-001)."""
@@ -1040,41 +1101,13 @@ class AutonomousBlueskyBotV2:
         return True
 
     def _update_heartbeat(self) -> None:
-        """Обновляет файл heartbeat для мониторинга активности"""
-        try:
-            self.last_heartbeat = datetime.now()
-            with open(self.heartbeat_file, 'w') as f:
-                f.write(f"{self.last_heartbeat.isoformat()}\n")
-                f.write(f"PID: {os.getpid()}\n")
-                f.write(f"Status: active\n")
-        except Exception as e:
-            logger.warning(f"⚠️ Не удалось обновить heartbeat: {e}")
-    
+        """Обновляет файл heartbeat (HB-001 → HeartbeatMonitor)."""
+        self.last_heartbeat = self.heartbeat_monitor.update()
+
     def _check_for_hanging(self) -> bool:
-        """Проверяет не завис ли бот на основе heartbeat файла"""
-        try:
-            if not os.path.exists(self.heartbeat_file):
-                return False
-                
-            with open(self.heartbeat_file, 'r') as f:
-                lines = f.readlines()
-                if not lines:
-                    return False
-                    
-                last_heartbeat_str = lines[0].strip()
-                last_heartbeat = datetime.fromisoformat(last_heartbeat_str)
-                
-                # Если heartbeat старше 15 минут - возможное зависание
-                time_diff = (datetime.now() - last_heartbeat).total_seconds()
-                if time_diff > 900:  # 15 минут
-                    logger.warning(f"⚠️ Потенциальное зависание: последний heartbeat {time_diff/60:.1f} минут назад")
-                    return True
-                    
-                return False
-        except Exception as e:
-            logger.warning(f"⚠️ Ошибка проверки зависания: {e}")
-            return False
-    
+        """Проверяет зависание по heartbeat (HB-001 → HeartbeatMonitor)."""
+        return self.heartbeat_monitor.is_stale()
+
     # Копируем все базовые методы из оригинального бота
     def clean_html(self, raw_html: str) -> str:
         """Удаляет HTML-теги из строки и декодирует HTML-сущности"""
@@ -2139,187 +2172,14 @@ class AutonomousBlueskyBotV2:
         return selected_template
     
     async def smart_engagement(self) -> None:
-        """УЛУЧШЕННОЕ умное взаимодействие с репостами и комментариями"""
-        try:
-            page_limit = int(self.config.get('engagement_settings', {}).get('timeline_page_limit', 100))
-            max_pages = int(self.config.get('engagement_settings', {}).get('timeline_pages', 3))
-            page_limit = max(20, min(page_limit, 100))
-            max_pages = max(1, min(max_pages, 5))
+        """Умное взаимодействие (ENG-001 → SmartEngagementOrchestrator)."""
+        cfg = SmartEngagementConfig.from_bot_config(
+            self.config,
+            max_interactions=self.max_interactions_per_cycle,
+            compliant_no_comments=bool(BLUESKY_COMPLIANT_MODE and NO_AUTO_COMMENTS),
+        )
+        await self.smart_engagement_orchestrator.run(cfg)
 
-            # Собираем несколько страниц ленты, чтобы анализировать больше кандидатов.
-            feed_items = []
-            cursor = None
-            for _ in range(max_pages):
-                timeline_page = await self._atproto_execute(
-                    self.bluesky_client.get_timeline, limit=page_limit, cursor=cursor
-                )
-                page_feed = getattr(timeline_page, 'feed', []) or []
-                feed_items.extend(page_feed)
-                cursor = getattr(timeline_page, 'cursor', None)
-                if not cursor or not page_feed:
-                    break
-            interactions = 0
-            posts_analyzed = 0
-            high_relevance_posts = 0
-            reposts_made = 0
-            comments_made = 0
-            
-            # Получаем настройки взаимодействия
-            engagement_settings = self.config.get('engagement_settings', {})
-            rel_settings = self.config.get('relevance_settings', {})
-            static_repost_threshold = engagement_settings.get('repost_threshold', 0.40)
-            comment_threshold = engagement_settings.get('comment_threshold', 0.65)
-            repost_probability = engagement_settings.get('repost_probability', 0.30)
-            comment_probability = engagement_settings.get('comment_probability', 0)
-            max_reposts = engagement_settings.get('max_reposts_per_cycle', 2)
-            max_comments = engagement_settings.get('max_comments_per_cycle', 0)
-            like_threshold = rel_settings.get('like_threshold', 0.20)
-
-            threshold_mode = engagement_settings.get('repost_threshold_mode', 'fixed')
-            quantile_p = engagement_settings.get('repost_quantile', 0.85)
-            min_threshold = engagement_settings.get('repost_min_threshold', 0.35)
-            fallback_min_posts = engagement_settings.get('repost_fallback_min_posts', 30)
-
-            logger.info(f"📰 Получено {len(feed_items)} постов для анализа (страниц: {max_pages}, limit/page: {page_limit})")
-
-            # --- Фаза 1: score по всем постам + собираем сигналы для Trend Radar ---
-            scored_posts = []
-            trend_snippets = []
-            my_did = getattr(self.bluesky_client.me, 'did', None) if hasattr(self.bluesky_client, 'me') and self.bluesky_client.me else None
-            for post in feed_items:
-                if not hasattr(post.post.record, 'text'):
-                    continue
-                author_did = getattr(post.post.author, 'did', None)
-                if not author_did or (my_did and author_did == my_did):
-                    continue
-                text = post.post.record.text
-                trend_snippets.append(text[:200])
-                score = self.calculate_relevance(text.lower(), post)
-                scored_posts.append((post, text, author_did, score))
-            # Cache snippets for Trend Radar
-            self._trend_timeline_snippets = trend_snippets[:100]
-            posts_analyzed = len(scored_posts)
-
-            # --- Фаза 2: динамический порог ---
-            all_scores = [s for _, _, _, s in scored_posts]
-            if threshold_mode == 'dynamic_quantile' and len(all_scores) >= fallback_min_posts:
-                sorted_scores = sorted(all_scores)
-                idx = int(len(sorted_scores) * quantile_p)
-                idx = min(idx, len(sorted_scores) - 1)
-                repost_threshold = max(min_threshold, sorted_scores[idx])
-                logger.info(f"🎲 Динамический порог репоста: P{int(quantile_p*100)}={sorted_scores[idx]:.2f} -> threshold={repost_threshold:.2f} (min={min_threshold})")
-            else:
-                repost_threshold = static_repost_threshold
-                logger.info(f"🎯 Фиксированный порог репоста: {repost_threshold:.2f} (постов {len(all_scores)} < {fallback_min_posts} или mode=fixed)")
-
-            if max_reposts == 0:
-                logger.info("🚫 Репосты ПОЛНОСТЬЮ ОТКЛЮЧЕНЫ (max_reposts=0)")
-
-            score_dist = {'0.0-0.1': 0, '0.1-0.2': 0, '0.2-0.3': 0, '0.3-0.4': 0, '0.4-0.5': 0, '0.5+': 0}
-            for s in all_scores:
-                if s < 0.1: score_dist['0.0-0.1'] += 1
-                elif s < 0.2: score_dist['0.1-0.2'] += 1
-                elif s < 0.3: score_dist['0.2-0.3'] += 1
-                elif s < 0.3: score_dist['0.3-0.4'] += 1
-                elif s < 0.4: score_dist['0.3-0.4'] += 1
-                elif s < 0.5: score_dist['0.4-0.5'] += 1
-                else: score_dist['0.5+'] += 1
-            logger.info(f"📊 Распределение score: {score_dist}")
-
-            # --- Фаза 3: действия по отсортированным постам ---
-            scored_posts.sort(key=lambda x: x[3], reverse=True)
-
-            for post, text, author_did, relevance_score in scored_posts:
-                if interactions >= self.max_interactions_per_cycle:
-                    break
-
-                author_handle = getattr(post.post.author, 'handle', 'unknown')
-                logger.info(f"🔍 @{author_handle}: score={relevance_score:.2f} | {text[:80]}{'...' if len(text) > 80 else ''}")
-
-                if relevance_score < like_threshold:
-                    continue
-
-                high_relevance_posts += 1
-
-                try:
-                    liked = await self.engagement_service.like(
-                        uri=post.post.uri,
-                        cid=post.post.cid,
-                        score=relevance_score,
-                        author_did=author_did,
-                        author_handle=author_handle,
-                    )
-                    if liked:
-                        interactions += 1
-                        logger.info("❤️ Лайк поставлен!")
-                        await asyncio.sleep(random.uniform(3, 7))
-
-                    if (relevance_score >= repost_threshold and
-                            reposts_made < max_reposts and
-                            random.random() < repost_probability and
-                            post.post.uri not in self.reposted_posts):
-                        post_created = None
-                        try:
-                            raw_ts = getattr(post.post.record, 'created_at', None)
-                            if raw_ts:
-                                post_created = datetime.fromisoformat(str(raw_ts).replace('Z', '+00:00')).replace(tzinfo=None)
-                        except Exception:
-                            pass
-                        policy_ok, policy_reason = self.repost_policy.check(
-                            text, author_did, post_created, self.recent_repost_authors)
-                        if policy_ok:
-                            reposted = await self.engagement_service.repost(
-                                uri=post.post.uri,
-                                cid=post.post.cid,
-                                score=relevance_score,
-                                author_did=author_did,
-                            )
-                            if reposted:
-                                reposts_made += 1
-                                logger.info(f"🔄 Репост выполнен! (score={relevance_score:.2f}, #{reposts_made}/{max_reposts})")
-                                await asyncio.sleep(random.uniform(5, 10))
-                        else:
-                            logger.info(f"🛡️ Репост заблокирован policy: {policy_reason}")
-
-                    if author_did:
-                        self.update_user_relationship(author_did, 'engagement', relevance_score)
-
-                except Exception as e:
-                    logger.error(f"Ошибка взаимодействия: {e}")
-
-                await asyncio.sleep(random.uniform(5, 12))
-            
-            # РАСШИРЕННАЯ статистика
-            logger.info(f"📊 Итого проанализировано: {posts_analyzed} постов")
-            logger.info(f"🎯 Высокая релевантность: {high_relevance_posts} постов")
-            logger.info(
-                f"❤️ Лайков поставлено (этот цикл): {interactions} | всего за сессию: {self.session_stats['likes_given']}"
-            )
-            logger.info(f"🔄 Репостов сделано: {reposts_made}")
-            if BLUESKY_COMPLIANT_MODE and NO_AUTO_COMMENTS:
-                logger.info(f"💬 Комментарии: ОТКЛЮЧЕНЫ (BlueSky compliance)")
-            else:
-                logger.info(f"💬 Комментариев отправлено: {comments_made}")
-            
-            # Детальная статистика эффективности
-            if posts_analyzed > 0:
-                relevance_rate = (high_relevance_posts / posts_analyzed) * 100
-                # Доля от всех просканированных постов в ленте (тот же знаменатель, что и «Итого проанализировано»).
-                like_rate = (interactions / posts_analyzed) * 100
-                repost_rate = (reposts_made / posts_analyzed) * 100
-                comment_rate = (comments_made / posts_analyzed) * 100
-                
-                logger.info(f"📈 Показатели эффективности:")
-                logger.info(f"   📊 Процент релевантных постов: {relevance_rate:.1f}%")
-                logger.info(f"   ❤️ Процент лайков: {like_rate:.1f}%")
-                logger.info(f"   🔄 Процент репостов: {repost_rate:.1f}%")
-                logger.info(f"   💬 Процент комментариев: {comment_rate:.1f}%")
-                logger.info(f"   🎯 Конверсия релевантности: {(interactions/high_relevance_posts*100):.1f}%" if high_relevance_posts > 0 else "   🎯 Конверсия релевантности: 0%")
-                    
-        except Exception as e:
-            logger.error(f"❌ Ошибка умного взаимодействия: {e}")
-            self.session_stats['errors'] += 1
-    
     def calculate_relevance(self, text: str, post) -> float:
         """Компонентный расчёт релевантности поста (topical + structure + engagement)."""
         import math
@@ -2526,18 +2386,15 @@ class AutonomousBlueskyBotV2:
             logger.info("✅ Все фоновые задачи остановлены")
 
         try:
-            if hasattr(self, 'commented_posts'):
-                self.memory.commented_posts_cache = self.commented_posts
-            if hasattr(self, 'recent_comments'):
-                self.memory.recent_comments_cache = self.recent_comments[-20:]
-            if hasattr(self, 'liked_posts'):
-                self.memory.liked_posts_cache = self.liked_posts
-            if hasattr(self, 'reposted_posts'):
-                self.memory.reposted_posts_cache = self.reposted_posts
-            if hasattr(self, 'followed_users'):
-                self.memory.followed_users_cache = self.followed_users
-
-            self.memory.last_update = datetime.now()
+            sync_engagement_caches_to_memory(
+                self.memory,
+                commented_posts=getattr(self, "commented_posts", None),
+                recent_comments=getattr(self, "recent_comments", None),
+                liked_posts=getattr(self, "liked_posts", None),
+                reposted_posts=getattr(self, "reposted_posts", None),
+                followed_users=getattr(self, "followed_users", None),
+                skip_missing=True,
+            )
             self.memory.save()
             logger.info("💾 Финальное сохранение памяти (JSON, атомарная запись)")
 

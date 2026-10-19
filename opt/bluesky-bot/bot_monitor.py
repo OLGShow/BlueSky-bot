@@ -16,7 +16,13 @@ IS_WINDOWS = platform.system() == 'Windows'
 
 
 def check_heartbeat():
-    """Проверяет файл heartbeat бота"""
+    """Проверяет файл heartbeat бота (HeartbeatMonitor / HB-002)."""
+    try:
+        from heartbeat_monitor import HeartbeatMonitor
+        return HeartbeatMonitor('bot_heartbeat.txt').monitor_status()
+    except ImportError:
+        pass
+
     heartbeat_file = 'bot_heartbeat.txt'
 
     if not os.path.exists(heartbeat_file):

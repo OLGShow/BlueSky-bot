@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Added
+- Phase 7 leftovers: `heartbeat_monitor.py`, `engagement_cache_sync.py`, `smart_engagement.py`, `daily_reporting.py` (HB/CACHE/ENG/DRY)
+- Hermetic suites: `test_heartbeat_monitor_hb001`, `test_engagement_cache_sync_cache001`, `test_smart_engagement_eng001`, `test_daily_reporting_dry001`
 - Soft-fail strategies + duplicate fallback (`soft_fail_posts.py`, SOFT-001…004) + content dedup façade (`content_publish_state.py`, STATE-001)
 - Hermetic suites: `test_soft_fail_soft002`, `test_content_publish_state_state001` (SEC-001 retargeted to façade)
 - Viral/trending strategies (`viral_posts.py`, STRAT-009…011) + Phase 7 slices: `strategy_learning.py` (LEARN-001), `bot_cycle.BotCycleRunner` (CYCLE-001)

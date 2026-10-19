@@ -4,7 +4,7 @@
 **Parent orchestration:** orch-2026-10-19-14-33-layout-godobj  
 **Parent plan:** `ai_docs/develop/plans/2026-10-19-layout-and-god-object-prep.md`  
 **ADR:** `ai_docs/develop/architecture/2026-10-19-layering-and-ports.md`  
-**Status:** 🟡 Near complete (Phases 2–7 done; heartbeat / engagement cache / timeline deferred)  
+**Status:** ✅ Phase 2–7 complete (God Object slices extracted; remaining polish optional)  
 **Goal:** Complete DIP / OCP decomposition of `AutonomousBlueskyBotV2` beyond Phase 1  
   (Engagement ports + strategy registry skeleton).  
 **Priority:** High  
@@ -20,7 +20,7 @@
 | **Phase 4** — RetryPolicy | ✅ Done (AI+RSS+ATProto/media) | Prior orch AI/RSS; `orch-2026-10-19-17-34-strat-families` — ATProto + media upload via RetryPolicy |
 | **Phase 5** — quality pipeline | ✅ On scheduled post | `orch-2026-10-19-17-06-strat003-io` — `QualityPipeline` / `regenerate_until_quality` on `create_scheduled_post` |
 | **Phase 6** — shared HTTP | ✅ Done | AI adapters + formatter / rich_posts shared session (`HTTP-002`) |
-| **Phase 7** — LEARN + CYCLE + dedup state | ✅ Partial | LEARN/CYCLE + `ContentPublishState`; **heartbeat / cache sync / engagement timeline deferred** |
+| **Phase 7** — LEARN + CYCLE + state + HB/ENG/DRY | ✅ Done | Through `orch-2026-10-19-18-52-p7-hb-eng` — heartbeat, cache sync, smart engagement, daily reporting |
 
 ---
 
@@ -47,9 +47,9 @@ Bot remains composition root until slices are small enough to drop.
 | **4** | RetryPolicy on outbound I/O | 2–3h | ✅ Done — AI+RSS + ATProto/media (`orch-2026-10-19-17-34-strat-families`) |
 | **5** | Unified quality pipeline | 3–4h | ✅ Scheduled-post path (`orch-2026-10-19-17-06-strat003-io`) |
 | **6** | Shared HTTP `ClientSession` injection | 2h | ✅ Done — AI + formatter/rich_posts (`HTTP-002`) |
-| **7** | Further bot slices (state / schedule / learning) | ongoing | ✅ LEARN + CYCLE + dedup façade; **heartbeat/cache deferred** |
+| **7** | Further bot slices (state / schedule / learning) | done | ✅ LEARN + CYCLE + dedup + HB + cache sync + smart engagement + daily reporting |
 
-Suggested next orchestration: **heartbeat file I/O** and/or **engagement cache ↔ memory sync**, ≤10 tasks, same verify gate.
+Suggested next work: formal architecture re-score / audit refresh; optional LOC shrink of remaining thin bot shell.
 
 ---
 
@@ -194,18 +194,18 @@ post = await strategy_fn()
 
 ## Phase 7 — Further bot slices (backlog)
 
-**Status:** ✅ LEARN + CYCLE + dedup façade done; remaining backlog below
+**Status:** ✅ Complete (`orch-2026-10-19-17-51-viral-p7` … `orch-2026-10-19-18-52-p7-hb-eng`)
 
 **Done:**
-- Learning weight updates → `app/strategy_learning.py` (`apply_strategy_weights_from_outcomes`); bot thin delegate
-- Main-loop tick → `app/bot_cycle.py` (`BotCycleRunner.tick`); bot keeps `while True` + sleep/auth/budget logs
-- Content dedup/publish → `app/content_publish_state.py` (`ContentPublishState`); bot thin delegates (`orch-2026-10-19-18-33-softfail-state`)
+- Learning weight updates → `app/strategy_learning.py`
+- Main-loop tick → `app/bot_cycle.py` (`BotCycleRunner.tick`)
+- Content dedup/publish → `app/content_publish_state.py`
+- Heartbeat → `app/heartbeat_monitor.py` (+ `bot_monitor` shared)
+- Engagement cache sync → `app/engagement_cache_sync.py` (cycle + shutdown)
+- Smart engagement → `app/smart_engagement.py` (`SmartEngagementOrchestrator`)
+- Daily report / dry-run flush → `app/daily_reporting.py` (`DailyReportingFacade`)
 
-**Still deferred:**
-- Heartbeat file I/O → `state_service` / monitor helper
-- Engagement cache ↔ memory sync consolidation
-- Engagement timeline / smart engagement orchestration (above EngagementService)
-- Dry-run reporting aggregation
+**Optional later:** further LOC shrink of bot shell; formal architecture re-audit.
 
 Each slice: ports → wire → tests → shrink bot LOC. Prefer ≤1 major slice per orchestration.
 

@@ -37,10 +37,13 @@ PYFILES=(
     content_ports.py
     content_publish_state.py
     content_service.py
+    daily_reporting.py
     dynamic_content_system.py
+    engagement_cache_sync.py
     engagement_ports.py
     engagement_service.py
     growth_engine.py
+    heartbeat_monitor.py
     post_strategies.py
     http_session.py
     log_sanitizer.py
@@ -49,6 +52,7 @@ PYFILES=(
     quality_pipeline.py
     resilience_service.py
     rss_source_manager.py
+    smart_engagement.py
     state_service.py
     strategy_learning.py
     url_safety.py

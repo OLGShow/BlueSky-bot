@@ -147,6 +147,25 @@ Verify after thin-shell: smoke **2/2**; unittest **306** OK (3 skipped).
 
 **Layout health: Healthy.** No mandatory FIX stages left. Optional: document `bot_config` SoT; later decide untrack `opt/*.py`.
 
+### Post Wave 3 re-score (2026-10-19 night)
+
+Formal re-score after God-object Phases 2–7 + PolicyLearner Wave 1–3 (strategy/format/engagement bandits, followers reward, LLM retro, SafetyGovernor). Composition root still `bluesky_bot_v2.py` (~**3917** LOC / ~**114** methods — up from ~3151 post thin-shell due to learning wire/catch-up).
+
+| Area | Post Phase 7 | Post Wave 3 | Δ |
+|------|:------------:|:-----------:|:-:|
+| Structure | 8 | **8.5** | +0.5 |
+| Dependencies | 8 | **8.5** | +0.5 |
+| Scalability | 6 | **7** | +1 |
+| Maintainability | 7 | **8** | +1 |
+| Testability | 8 | **8.5** | +0.5 |
+| **Overall** | **7.5** | **8.0** | **+0.5** |
+
+**What moved the needle:** Wave 1–3 pure learners + ADR-002; SafetyGovernor; hermetic + smoke coverage.
+
+**Open items (cap below ~8.5):** God Object shell ~3.9k LOC; credit/catch-up/retro still on bot; health/media/auth thin-shell leftovers; dual quality helpers.
+
+**Top levers next:** (1) extract publish/credit orchestration, (2) health/media/auth thin-shell, (3) LearningOrchestrator so bandit wire is not `__init__` glue.
+
 ---
 
 ## Baseline snapshot (frozen — afternoon audit)

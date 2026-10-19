@@ -136,8 +136,11 @@ rss_source_state.json
 action_ledger.jsonl
 **/action_ledger.jsonl
 dry_run_report.json
-# Local agent / verify output (never commit)
-reports/
+# Local agent / verify output (never commit; root only)
+/reports/
+# Permanent develop docs reports must remain trackable
+!ai_docs/develop/reports/
+!ai_docs/develop/reports/**
 *_agent_report.json
 *_agent_report.md
 agents_summary.json

@@ -24,8 +24,9 @@ from typing import Dict, List, Set
 from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+APP_DIR = REPO_ROOT / "app"
+if str(APP_DIR) not in sys.path:
+    sys.path.insert(0, str(APP_DIR))
 
 from state_service import StateService, _PICKLE_MAX_BYTES  # noqa: E402
 

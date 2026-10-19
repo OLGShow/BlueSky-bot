@@ -36,8 +36,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Копируем исходный код (secrets excluded by .dockerignore — no ARG/ENV secrets)
-COPY . .
+# Runtime SoT lives in app/; flatten into WORKDIR for /opt-parity imports
+COPY app/ ./
+COPY bot_config.json env.example ./
 
 # Создаем директории для данных и логов
 RUN mkdir -p /app/data /app/logs && \

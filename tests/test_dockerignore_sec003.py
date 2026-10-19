@@ -18,6 +18,7 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+APP_DIR = REPO_ROOT / "app"
 DOCKERIGNORE = REPO_ROOT / ".dockerignore"
 DOCKERFILE = REPO_ROOT / "Dockerfile"
 
@@ -62,9 +63,9 @@ MUST_EXCLUDE = (
 )
 
 # Paths that should remain eligible for COPY (not matched by secret/state rules).
-# Note: broad patterns like etc/ exclude everything under etc/; source lives at repo root.
+# Note: broad patterns like etc/ exclude everything under etc/; SoT lives under app/.
 MUST_NOT_EXCLUDE = (
-    "bluesky_bot_v2.py",
+    "app/bluesky_bot_v2.py",
     "requirements.txt",
     "env.example",
     "Dockerfile",

@@ -19,7 +19,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-BOT_MODULE = REPO_ROOT / "bluesky_bot_v2.py"
+APP_DIR = REPO_ROOT / "app"
+BOT_MODULE = APP_DIR / "bluesky_bot_v2.py"
 
 HELPER_NAME = "_quality_theme_post"
 DELEGATE_METHODS = (

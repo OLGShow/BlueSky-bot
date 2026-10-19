@@ -18,8 +18,9 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+APP_DIR = REPO_ROOT / "app"
+if str(APP_DIR) not in sys.path:
+    sys.path.insert(0, str(APP_DIR))
 
 from log_sanitizer import SanitizingFilter  # noqa: E402
 
@@ -87,7 +88,7 @@ class TestLogSanitizerLog001(unittest.TestCase):
         self.assertIn(short, rec.msg)
 
     def test_token_re_source_lists_openrouter_first(self):
-        src = (REPO_ROOT / "log_sanitizer.py").read_text(
+        src = (APP_DIR / "log_sanitizer.py").read_text(
             encoding="utf-8", errors="replace"
         )
         self.assertIn("sk-or-v1-", src)

@@ -32,8 +32,9 @@ cp "$SCRIPT_DIR/deb/postrm"    "$STAGE/DEBIAN/postrm"
 chmod 755 "$STAGE/DEBIAN/postinst" "$STAGE/DEBIAN/prerm" "$STAGE/DEBIAN/postrm"
 
 # --- Application code ---
-# Root repo modules are the source of truth (SoT). Stage is built fresh from root;
+# app/ modules are the source of truth (SoT). Stage stays flat under /opt/bluesky-bot/;
 # keep this list in sync with packaging/sync-opt-from-sot.sh.
+APP_DIR="$REPO_ROOT/app"
 PYFILES=(
     bluesky_bot_v2.py
     ai_improvements.py
@@ -57,7 +58,7 @@ PYFILES=(
 )
 
 for f in "${PYFILES[@]}"; do
-    [ -f "$REPO_ROOT/$f" ] && cp "$REPO_ROOT/$f" "$STAGE/opt/bluesky-bot/"
+    [ -f "$APP_DIR/$f" ] && cp "$APP_DIR/$f" "$STAGE/opt/bluesky-bot/"
 done
 
 cp "$REPO_ROOT/requirements.txt" "$STAGE/opt/bluesky-bot/"

@@ -1,12 +1,13 @@
 #!/bin/bash
 #
-# SYNC: copy runtime Python modules from repo root (SoT) → opt/bluesky-bot/
+# SYNC: copy runtime Python modules from app/ (SoT) → opt/bluesky-bot/
 #
-# Direction is ONE-WAY only: root → opt. Never copy opt back into root.
+# Direction is ONE-WAY only: app/ → opt. Never copy opt back into app/.
 # Do NOT copy secrets (.env, session.json, credentials, bot_memory.*, etc.).
 #
-# packaging/_stage/ is ephemeral (created/destroyed by build-deb.sh from root);
+# packaging/_stage/ is ephemeral (created/destroyed by build-deb.sh from app/);
 # this script keeps the tracked deploy mirror under opt/bluesky-bot/ aligned.
+# Deploy layout stays flat under /opt/bluesky-bot/ (systemd WorkingDirectory).
 #
 # Usage:  bash packaging/sync-opt-from-sot.sh
 #
@@ -14,6 +15,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+APP_DIR="$REPO_ROOT/app"
 OPT_DIR="$REPO_ROOT/opt/bluesky-bot"
 
 # Must match packaging/build-deb.sh PYFILES (runtime modules only).
@@ -44,9 +46,9 @@ mkdir -p "$OPT_DIR"
 synced=0
 missing=0
 for f in "${PYFILES[@]}"; do
-    src="$REPO_ROOT/$f"
+    src="$APP_DIR/$f"
     if [[ ! -f "$src" ]]; then
-        echo "WARN: missing SoT module: $f" >&2
+        echo "WARN: missing SoT module: app/$f" >&2
         missing=$((missing + 1))
         continue
     fi
@@ -56,8 +58,8 @@ for f in "${PYFILES[@]}"; do
 done
 
 echo ""
-echo "Root is SoT. Synced $synced module(s) → opt/bluesky-bot/"
+echo "app/ is SoT. Synced $synced module(s) → opt/bluesky-bot/"
 if [[ "$missing" -gt 0 ]]; then
-    echo "WARN: $missing listed module(s) missing from root" >&2
+    echo "WARN: $missing listed module(s) missing from app/" >&2
     exit 1
 fi

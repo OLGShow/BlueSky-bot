@@ -53,6 +53,8 @@ import health, `bot_config.json` presence, `DRY_RUN` path sanity, creds fail-fas
 python verify_bot.py --smoke
 # or:
 python scripts/smoke_check.py
+# SoT module path:
+python app/verify_bot.py --smoke
 ```
 
 | Exit code | Meaning |

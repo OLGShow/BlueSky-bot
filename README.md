@@ -98,12 +98,14 @@ systemctl status bluesky-bot 2>/dev/null || echo "service removed"
 
 ## Что внутри
 
-- `bluesky_bot_v2.py` — основной runtime
-- `state_service.py` — JSON state, action ledger, session store, locks
-- `engagement_service.py` — like/repost/follow слой
-- `resilience_service.py` — retry/backoff/circuit breaker
-- `content_service.py` — генерация контента и пост-проверки
-- `verify_bot.py` — локальный verification suite
+Исходники SoT: [`app/`](app/) (в деплое копируются flat в `/opt/bluesky-bot/`).
+
+- `app/bluesky_bot_v2.py` — основной runtime
+- `app/state_service.py` — JSON state, action ledger, session store, locks
+- `app/engagement_service.py` — like/repost/follow слой
+- `app/resilience_service.py` — retry/backoff/circuit breaker
+- `app/content_service.py` — генерация контента и пост-проверки
+- `verify_bot.py` — shim → `app/verify_bot.py` (локальный verification suite)
 
 ## CI/CD
 

@@ -44,7 +44,12 @@ import shutil
 import time
 from datetime import datetime, timedelta
 
-sys.path.insert(0, os.path.dirname(__file__))
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.dirname(_APP_DIR)
+sys.path.insert(0, _APP_DIR)
+sys.path.insert(0, _REPO_ROOT)
+if os.getcwd() != _REPO_ROOT:
+    os.chdir(_REPO_ROOT)
 
 if hasattr(sys.stdout, "reconfigure"):
     try:

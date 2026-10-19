@@ -33,10 +33,11 @@ from typing import List, Optional, Sequence
 from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+APP_DIR = REPO_ROOT / "app"
+if str(APP_DIR) not in sys.path:
+    sys.path.insert(0, str(APP_DIR))
 
-BOT_MODULE_PATH = REPO_ROOT / "bluesky_bot_v2.py"
+BOT_MODULE_PATH = APP_DIR / "bluesky_bot_v2.py"
 CONFIG_CANDIDATES = (
     REPO_ROOT / "bot_config.json",
     Path("/etc/bluesky-bot/bot_config.json"),

@@ -166,7 +166,9 @@ packaging/_stage/
 # IDE files
 .vscode/
 .idea/
-.cursor/
+.cursor/*
+!.cursor/rules/
+!.cursor/rules/**
 # Only ignore a nested clone at repo root (not opt/bluesky-bot or etc/bluesky-bot;
 # on Windows ignorecase, unanchored BlueSky-bot/ would match those paths).
 /BlueSky-bot/

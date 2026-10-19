@@ -160,8 +160,8 @@
   },
   "language_settings": {
     "primary_language": "en",
-    "secondary_language": "ru", 
-    "english_content_percentage": 95,
+    "secondary_language": null,
+    "english_content_percentage": 100,
     "localized_trending_topics": true,
     "cultural_context_awareness": true
   },
@@ -191,7 +191,7 @@
     "warm_start_strength": 4,
     "deltas_max": 20,
     "state_path": "learning_state.json",
-    "followers_reward_weight": 0.15,
+    "followers_reward_weight": 0.10,
     "followers_scale": 5,
     "followers_state_path": "learning_followers.json"
   },
@@ -210,14 +210,14 @@
   },
   "safety_governor": {
     "enabled": true,
-    "min_budget_ratio": 0.05,
-    "followers_shock_abs": 50,
+    "min_budget_ratio": 0.08,
+    "followers_shock_abs": 30,
     "max_consecutive_errors": 5
   },
   "llm_retro": {
     "enabled": true,
     "interval_days": 7,
     "state_path": "learning_retro_state.json",
-    "dry_run": false
+    "dry_run": true
   }
 }

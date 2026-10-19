@@ -488,7 +488,7 @@ class AutonomousBlueskyBotV2:
             'motivation and personal growth', 'dreams and plans', 'climate change',
             'social justice', 'politics and society'
         ]
-        self.languages = ['en', 'ru']  # English first priority
+        self.languages = ['en']  # Bluesky audience: English only
         
         # Состояние бота
         self.memory = BotMemory.load()
@@ -2017,19 +2017,19 @@ class AutonomousBlueskyBotV2:
         logger.info(f"📝 РУЧНОЕ создание thread на тему: {topic}")
         
         prompt = f"""
-        Создай подробный анализ на тему "{topic}" для thread в социальной сети.
-        
-        Структура:
-        - Введение с хуком (50-80 символов)
-        - 3-4 ключевых пункта (по 100-150 символов каждый)
-        - Заключение с вопросом к аудитории (80-120 символов)
-        
-        Требования:
-        - Каждая часть должна быть интересной отдельно
-        - Используй эмодзи для структурирования
-        - Добавь релевантные хештеги
-        - In English
-        - Общий объем: 600-800 символов
+        Create a detailed analysis on "{topic}" for a social media thread.
+
+        Structure:
+        - Intro hook (50-80 characters)
+        - 3-4 key points (100-150 characters each)
+        - Closing question for the audience (80-120 characters)
+
+        Requirements:
+        - Each part should work as a standalone post
+        - Use emojis for structure
+        - Add relevant hashtags
+        - Write entirely in English
+        - Total length: 600-800 characters
         """
         
         long_content = await self.pollinations_ai.generate_content(prompt, model_key='powerful')
@@ -2067,8 +2067,8 @@ class AutonomousBlueskyBotV2:
                 response = await self.ai_client.chat.completions.create(
                     model="gpt-3.5-turbo",
                     messages=[
-                        {"role": "system", "content": "Ты дружелюбный пользователь социальных сетей. Пиши короткие позитивные комментарии in English с эмодзи. Максимум 80 символов."},
-                        {"role": "user", "content": f"Прокомментируй этот пост: {post_text[:200]}"}
+                        {"role": "system", "content": "You are a friendly social media user. Write short positive comments in English with emojis. Max 80 characters."},
+                        {"role": "user", "content": f"Comment on this post: {post_text[:200]}"}
                     ],
                     max_tokens=50,
                     temperature=0.8

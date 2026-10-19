@@ -1,0 +1,50 @@
+---
+description: Mandatory post-deploy verification — never claim OK without evidence
+alwaysApply: true
+---
+
+# Deploy verification (mandatory)
+
+Host: `192.168.2.6`, unit `bluesky-bot`, cwd `/opt/bluesky-bot`, config also `/etc/bluesky-bot/bot_config.json`.
+
+## Never say «всё ок / задеплоено» until checklist below is green
+
+Saying OK from memory or from «scp finished» alone is **forbidden**. Re-check with live SSH evidence in the same turn.
+
+## After every deploy / config change
+
+1. **File identity (SoT vs host)** — SHA256 (or size+mtime is NOT enough) for every touched module:
+   - Compare local `app/<file>` ↔ `/opt/bluesky-bot/<file>`
+   - Must match; if not → scp again, then re-hash
+2. **Both configs** — local `bot_config.json` must match **both**:
+   - `/opt/bluesky-bot/bot_config.json` (WorkingDirectory — what the process loads)
+   - `/etc/bluesky-bot/bot_config.json`
+   - Diff knobs if hashes differ; do not ignore «small» drift
+3. **Process freshness** — `systemctl restart` after code/config sync; confirm:
+   - `systemctl is-active` = `active`
+   - Main PID start time **≥** mtime of newest deployed file
+   - No `Traceback` in `journalctl -u bluesky-bot --since "2 min ago"`
+4. **Wiring smoke on host** (from `/opt/bluesky-bot` with venv python):
+   - Import new modules
+   - Assert critical strings/imports exist in `bluesky_bot_v2.py` for the feature just shipped
+5. **Runtime artifacts** (when relevant) — state/log files actually appear/update under cwd (`learning_*.json`, `reports/`, etc.)
+
+## Anti-patterns
+
+```
+❌ "scp done → OK"
+❌ "active yesterday → still OK"
+❌ Checked only /etc, ignored /opt (bot reads /opt)
+❌ Checked only module list exists, not hashes vs SoT
+❌ Claimed Wave N deployed because Wave N-1 was deployed earlier
+```
+
+```
+✅ Hash table local vs remote in the reply
+✅ Explicit restart + PID etime vs file mtime
+✅ Call out any drift found and fix it before declaring OK
+```
+
+## If anything fails
+
+Fix → re-run the full checklist → only then report OK. Partial green ≠ done.

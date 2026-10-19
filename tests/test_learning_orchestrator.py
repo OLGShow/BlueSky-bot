@@ -118,6 +118,171 @@ class TestFromConfig:
         assert status.ok is True
 
 
+class TestApplyPostCredits:
+    def _arm(self) -> str:
+        return "_create_quality_news_post"
+
+    def _post(self, arm: str) -> dict:
+        return {
+            "uri": "at://did/app.bsky.feed.post/xyz",
+            "strategy_key": arm,
+            "ab_format": "format_a",
+            "type": "general",
+            "rewarded_checks": [],
+            "format_rewarded_checks": [],
+            "likes": 4,
+            "reposts": 1,
+            "replies": 0,
+        }
+
+    def test_credits_strategy_and_format_idempotent(self, tmp_path: Path) -> None:
+        cfg = _minimal_config(tmp_path)
+        orch = LearningOrchestrator.from_config(
+            cfg, config_path=str(tmp_path / "bot_config.json")
+        )
+        arm = self._arm()
+        post = self._post(arm)
+        config = {"post_strategies": dict(cfg["post_strategies"])}
+
+        result = orch.apply_post_credits(
+            post,
+            ["6h"],
+            ["6h"],
+            can_credit=True,
+            can_sync_config=True,
+            followers_delta=None,
+            config=config,
+        )
+        assert result["strategy_credited"] == 1
+        assert result["format_credited"] == 1
+        assert result["synced"] is True
+        assert post["rewarded_checks"] == ["6h"]
+        assert post["format_rewarded_checks"] == ["6h"]
+        assert orch.policy_learner.total_credit_mass > 0
+        assert orch.format_bandit is not None
+        assert orch.format_bandit.total_credit_mass > 0
+
+        mass_s = orch.policy_learner.total_credit_mass
+        mass_f = orch.format_bandit.total_credit_mass
+        again = orch.apply_post_credits(
+            post,
+            ["6h"],
+            ["6h"],
+            can_credit=True,
+            can_sync_config=True,
+            config=config,
+        )
+        assert again == {
+            "strategy_credited": 0,
+            "format_credited": 0,
+            "synced": False,
+        }
+        assert orch.policy_learner.total_credit_mass == mass_s
+        assert orch.format_bandit.total_credit_mass == mass_f
+
+    def test_blocked_when_can_credit_false(self, tmp_path: Path) -> None:
+        cfg = _minimal_config(tmp_path)
+        orch = LearningOrchestrator.from_config(
+            cfg, config_path=str(tmp_path / "bot_config.json")
+        )
+        post = self._post(self._arm())
+        result = orch.apply_post_credits(
+            post,
+            ["6h"],
+            ["6h"],
+            can_credit=False,
+            can_sync_config=True,
+            config={"post_strategies": {}},
+        )
+        assert result == {
+            "strategy_credited": 0,
+            "format_credited": 0,
+            "synced": False,
+        }
+        assert post["rewarded_checks"] == []
+        assert post["format_rewarded_checks"] == []
+        assert orch.policy_learner.total_credit_mass == 0
+
+    def test_credit_checks_for_post_uses_eligibility(
+        self, tmp_path: Path
+    ) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        cfg = _minimal_config(tmp_path)
+        orch = LearningOrchestrator.from_config(
+            cfg, config_path=str(tmp_path / "bot_config.json")
+        )
+        now = datetime(2026, 10, 19, 12, 0, tzinfo=timezone.utc)
+        post = self._post(self._arm())
+        post["timestamp"] = (now - timedelta(hours=7)).isoformat()
+        result = orch.credit_checks_for_post(
+            post,
+            now,
+            can_credit=True,
+            can_sync_config=False,
+            config=None,
+        )
+        assert result["strategy_credited"] == 1
+        assert result["format_credited"] == 1
+        assert result["synced"] is False
+        assert post["rewarded_checks"] == ["6h"]
+
+
+class TestApplyEngagementCredits:
+    def test_credits_and_idempotent(self, tmp_path: Path) -> None:
+        cfg = _minimal_config(tmp_path)
+        orch = LearningOrchestrator.from_config(
+            cfg, config_path=str(tmp_path / "bot_config.json")
+        )
+        action = {
+            "uri": "at://did/app.bsky.feed.post/eng",
+            "topic": "tech",
+            "rewarded_checks": [],
+        }
+        n = orch.apply_engagement_credits(
+            action,
+            ["6h"],
+            likes=3,
+            replies=1,
+            reposts=0,
+            can_credit=True,
+        )
+        assert n == 1
+        assert action["rewarded_checks"] == ["6h"]
+        assert orch.engagement_learner.learner.total_credit_mass > 0
+
+        again = orch.apply_engagement_credits(
+            action,
+            ["6h"],
+            likes=3,
+            replies=1,
+            reposts=0,
+            can_credit=True,
+        )
+        assert again == 0
+
+    def test_blocked_when_can_credit_false(self, tmp_path: Path) -> None:
+        cfg = _minimal_config(tmp_path)
+        orch = LearningOrchestrator.from_config(
+            cfg, config_path=str(tmp_path / "bot_config.json")
+        )
+        action = {
+            "uri": "at://did/app.bsky.feed.post/eng",
+            "topic": "tech",
+            "rewarded_checks": [],
+        }
+        n = orch.apply_engagement_credits(
+            action,
+            ["6h"],
+            likes=3,
+            replies=1,
+            reposts=0,
+            can_credit=False,
+        )
+        assert n == 0
+        assert action["rewarded_checks"] == []
+
+
 class TestAstIsolation:
     def test_no_bluesky_bot_v2_import(self) -> None:
         tree = ast.parse(
@@ -137,3 +302,7 @@ class TestAstIsolation:
         assert "self.learning = LearningOrchestrator.from_config" in src
         assert "self.policy_learner = self.learning.policy_learner" in src
         assert "self.safety_governor = self.learning.safety_governor" in src
+        assert "credit_checks_for_post" in src
+        assert "credit_checks_for_action" in src
+        assert "apply_post_credits" in src
+        assert "apply_engagement_credits" in src

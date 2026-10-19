@@ -14,10 +14,18 @@ import logging
 from typing import Any, Mapping, Optional
 
 from agent_decision_log import AgentDecisionLog
-from engagement_learner import EngagementLearner
+from engagement_learner import (
+    EngagementLearner,
+    eligible_engagement_catch_up_checks,
+)
 from follower_tracker import FollowerTracker
 from llm_retro import LlmRetro
-from policy_learner import FORMAT_ARM_KEYS, PolicyLearner
+from policy_learner import (
+    FORMAT_ARM_KEYS,
+    PolicyLearner,
+    eligible_catch_up_checks,
+    eligible_format_catch_up_checks,
+)
 from safety_governor import SafetyGovernor, SafetyStatus
 
 logger = logging.getLogger(__name__)
@@ -165,3 +173,212 @@ class LearningOrchestrator:
             )
         except Exception as exc:
             logger.warning("decision_log failed: %s", exc)
+
+    def apply_post_credits(
+        self,
+        post: dict,
+        strategy_checks: list[str],
+        format_checks: list[str],
+        *,
+        can_credit: bool,
+        can_sync_config: bool,
+        followers_delta: float | None = None,
+        config: dict | None = None,
+    ) -> dict:
+        """Credit strategy + format for given check_ids. Mutates post rewarded lists.
+
+        Returns ``{strategy_credited, format_credited, synced}``.
+        If not ``can_credit``: return zeros (caller may log).
+        """
+        empty = {"strategy_credited": 0, "format_credited": 0, "synced": False}
+        if not can_credit:
+            return empty
+        if not isinstance(post, dict):
+            return empty
+
+        strategy_credited = 0
+        format_credited = 0
+        synced = False
+
+        strategy_key = post.get("strategy_key")
+        likes = post.get("likes")
+        reposts = post.get("reposts")
+        replies = post.get("replies")
+        rewarded = post.setdefault("rewarded_checks", [])
+        if not isinstance(rewarded, list):
+            rewarded = []
+            post["rewarded_checks"] = rewarded
+
+        for check_id in strategy_checks or []:
+            if check_id in rewarded:
+                continue
+            if not strategy_key:
+                continue
+            ok = self.policy_learner.credit(
+                strategy_key,
+                likes,
+                reposts,
+                replies,
+                check_id,
+                followers_delta=followers_delta,
+            )
+            if ok:
+                rewarded.append(check_id)
+                strategy_credited += 1
+                logger.info(
+                    "🧠 PolicyLearner credit %s arm=%s likes=%s "
+                    "reposts=%s replies=%s",
+                    check_id,
+                    strategy_key,
+                    likes,
+                    reposts,
+                    replies,
+                )
+
+        ab_fmt = post.get("ab_format")
+        if self.format_bandit is not None and ab_fmt and format_checks:
+            fmt_rewarded = post.setdefault("format_rewarded_checks", [])
+            if not isinstance(fmt_rewarded, list):
+                fmt_rewarded = []
+                post["format_rewarded_checks"] = fmt_rewarded
+            for check_id in format_checks:
+                if check_id in fmt_rewarded:
+                    continue
+                ok = self.format_bandit.credit(
+                    ab_fmt,
+                    likes,
+                    reposts,
+                    replies,
+                    check_id,
+                )
+                if ok:
+                    fmt_rewarded.append(check_id)
+                    format_credited += 1
+                    logger.info(
+                        "🧠 FormatBandit credit %s arm=%s likes=%s "
+                        "reposts=%s replies=%s",
+                        check_id,
+                        ab_fmt,
+                        likes,
+                        reposts,
+                        replies,
+                    )
+
+        if strategy_credited > 0:
+            if can_sync_config and config is not None:
+                self.policy_learner.sync_config_weights(self.config_path)
+                config["post_strategies"] = self.policy_learner.export_weights()
+                synced = True
+            elif not can_sync_config:
+                logger.info(
+                    "🛡️ SafetyGovernor: config sync blocked"
+                )
+            self.policy_learner.save()
+
+        if format_credited > 0 and self.format_bandit is not None:
+            self.format_bandit.save()
+
+        return {
+            "strategy_credited": strategy_credited,
+            "format_credited": format_credited,
+            "synced": synced,
+        }
+
+    def credit_checks_for_post(
+        self,
+        post: dict,
+        now,
+        *,
+        can_credit: bool,
+        can_sync_config: bool,
+        followers_delta: float | None = None,
+        config: dict | None = None,
+    ) -> dict:
+        """Resolve eligible strategy+format checks, then :meth:`apply_post_credits`."""
+        strategy_checks = eligible_catch_up_checks(post, now)
+        format_checks = (
+            eligible_format_catch_up_checks(post, now)
+            if self.format_bandit is not None
+            else []
+        )
+        if not strategy_checks and not format_checks:
+            return {"strategy_credited": 0, "format_credited": 0, "synced": False}
+        return self.apply_post_credits(
+            post,
+            strategy_checks,
+            format_checks,
+            can_credit=can_credit,
+            can_sync_config=can_sync_config,
+            followers_delta=followers_delta,
+            config=config,
+        )
+
+    def apply_engagement_credits(
+        self,
+        action: dict,
+        check_ids: list[str],
+        likes,
+        replies,
+        reposts,
+        *,
+        can_credit: bool,
+    ) -> int:
+        """Credit engagement topic arms; mutate ``rewarded_checks``; save if any."""
+        if not can_credit:
+            return 0
+        eng = self.engagement_learner
+        if eng is None or not eng.enabled:
+            return 0
+        if not isinstance(action, dict):
+            return 0
+
+        topic = action.get("topic") or "_other"
+        rewarded = action.setdefault("rewarded_checks", [])
+        if not isinstance(rewarded, list):
+            rewarded = []
+            action["rewarded_checks"] = rewarded
+
+        credited = 0
+        for check_id in check_ids or []:
+            if check_id in rewarded:
+                continue
+            ok = eng.credit(topic, likes, replies, reposts, check_id)
+            if ok:
+                rewarded.append(check_id)
+                credited += 1
+                logger.info(
+                    "🧠 EngagementLearner credit %s topic=%s likes=%s "
+                    "reposts=%s replies=%s",
+                    check_id,
+                    topic,
+                    likes,
+                    reposts,
+                    replies,
+                )
+
+        if credited > 0:
+            eng.save()
+        return credited
+
+    def credit_checks_for_action(
+        self,
+        action: dict,
+        now,
+        likes,
+        replies,
+        reposts,
+        *,
+        can_credit: bool,
+    ) -> int:
+        """Resolve eligible engagement checks, then :meth:`apply_engagement_credits`."""
+        checks = eligible_engagement_catch_up_checks(action, now)
+        if not checks:
+            return 0
+        return self.apply_engagement_credits(
+            action,
+            checks,
+            likes,
+            replies,
+            reposts,
+            can_credit=can_credit,
+        )

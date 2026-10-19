@@ -105,13 +105,15 @@ class TestBotWiresFormatBandit:
 
     def test_delayed_check_credits_format_bandit(self) -> None:
         body = _delayed_performance_check_body(_bot_source())
-        assert "format_bandit.credit" in body
+        assert "apply_post_credits" in body
         assert "format_rewarded_checks" in body
 
     def test_catch_up_includes_format(self) -> None:
         src = _bot_source()
         assert "eligible_format_catch_up_checks" in src
-        assert "Format catch-up credit" in src or "format_bandit.credit" in src
+        assert "credit_checks_for_post" in src
+        orch = (APP_DIR / "learning_orchestrator.py").read_text(encoding="utf-8")
+        assert "format_bandit.credit" in orch
 
 
 class TestShareCap070:

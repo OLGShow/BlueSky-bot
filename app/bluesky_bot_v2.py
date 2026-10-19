@@ -2531,11 +2531,10 @@ class AutonomousBlueskyBotV2:
     async def catch_up_pending_credits(self) -> None:
         """Startup catch-up: fetch metrics + credit missed 6h/24h checks."""
         now = datetime.now(timezone.utc)
-        any_credited = False
-        any_format_credited = False
         scanned = 0
         credited_n = 0
         format_credited_n = 0
+        any_credited = False
         _sg = self._safety_status()
         if not _sg.can_credit:
             logger.info(
@@ -2556,7 +2555,6 @@ class AutonomousBlueskyBotV2:
                 continue
             scanned += 1
             uri = post.get('uri')
-            strategy_key = post.get('strategy_key')
             try:
                 metrics = await self.analyze_post_performance(uri)
             except Exception as e:
@@ -2573,82 +2571,25 @@ class AutonomousBlueskyBotV2:
             if 'engagement_rate' in metrics:
                 post['engagement_rate'] = metrics.get('engagement_rate')
 
-            rewarded = post.setdefault('rewarded_checks', [])
             followers_delta = self._followers_delta_for_post(
                 post, now_count=followers_now
             )
-            for check_id in checks:
-                if check_id in rewarded:
-                    continue
-                if not _sg.can_credit:
-                    continue
-                ok = self.policy_learner.credit(
-                    strategy_key,
-                    post['likes'],
-                    post['reposts'],
-                    post['replies'],
-                    check_id,
-                    followers_delta=followers_delta,
-                )
-                if ok:
-                    rewarded.append(check_id)
-                    any_credited = True
-                    credited_n += 1
-                    logger.info(
-                        "🧠 Catch-up credit %s arm=%s likes=%s reposts=%s replies=%s",
-                        check_id,
-                        strategy_key,
-                        post['likes'],
-                        post['reposts'],
-                        post['replies'],
-                    )
-
-            ab_fmt = post.get('ab_format')
-            if self.format_bandit is not None and ab_fmt and fmt_checks:
-                fmt_rewarded = post.setdefault('format_rewarded_checks', [])
-                for check_id in fmt_checks:
-                    if check_id in fmt_rewarded:
-                        continue
-                    if not _sg.can_credit:
-                        continue
-                    ok = self.format_bandit.credit(
-                        ab_fmt,
-                        post['likes'],
-                        post['reposts'],
-                        post['replies'],
-                        check_id,
-                    )
-                    if ok:
-                        fmt_rewarded.append(check_id)
-                        any_format_credited = True
-                        format_credited_n += 1
-                        logger.info(
-                            "🧠 Format catch-up credit %s arm=%s likes=%s "
-                            "reposts=%s replies=%s",
-                            check_id,
-                            ab_fmt,
-                            post['likes'],
-                            post['reposts'],
-                            post['replies'],
-                        )
+            result = self.learning.credit_checks_for_post(
+                post,
+                now,
+                can_credit=_sg.can_credit,
+                can_sync_config=_sg.can_sync_config,
+                followers_delta=followers_delta,
+                config=self.config,
+            )
+            credited_n += int(result.get("strategy_credited", 0))
+            format_credited_n += int(result.get("format_credited", 0))
+            if result.get("strategy_credited") or result.get("format_credited"):
+                any_credited = True
 
             await asyncio.sleep(0.5)
 
         if any_credited:
-            if _sg.can_sync_config:
-                self.policy_learner.sync_config_weights(self._config_path)
-                self.config['post_strategies'] = self.policy_learner.export_weights()
-            else:
-                logger.info(
-                    "🛡️ SafetyGovernor: config sync blocked — %s",
-                    ", ".join(_sg.reasons) or "unknown",
-                )
-            self.policy_learner.save()
-
-        if any_format_credited and self.format_bandit is not None:
-            self.format_bandit.save()
-
-        if any_credited or any_format_credited:
             self.memory.save()
 
         if scanned or credited_n or format_credited_n:
@@ -2777,7 +2718,6 @@ class AutonomousBlueskyBotV2:
                 continue
             scanned += 1
             uri = action.get("uri")
-            topic = action.get("topic") or "_other"
             try:
                 metrics = await self.analyze_post_performance(uri)
             except Exception as e:
@@ -2791,30 +2731,20 @@ class AutonomousBlueskyBotV2:
             likes = metrics.get("likes", 0)
             reposts = metrics.get("reposts", 0)
             replies = metrics.get("replies", 0)
-            rewarded = action.setdefault("rewarded_checks", [])
-            for check_id in checks:
-                if check_id in rewarded:
-                    continue
-                if not _sg.can_credit:
-                    continue
-                ok = eng.credit(topic, likes, replies, reposts, check_id)
-                if ok:
-                    rewarded.append(check_id)
-                    any_credited = True
-                    credited_n += 1
-                    logger.info(
-                        "🧠 Engagement catch-up %s topic=%s likes=%s "
-                        "reposts=%s replies=%s",
-                        check_id,
-                        topic,
-                        likes,
-                        reposts,
-                        replies,
-                    )
+            n = self.learning.credit_checks_for_action(
+                action,
+                now,
+                likes,
+                replies,
+                reposts,
+                can_credit=_sg.can_credit,
+            )
+            if n:
+                any_credited = True
+                credited_n += n
             await asyncio.sleep(0.5)
 
         if any_credited:
-            eng.save()
             self.memory.save()
 
         if scanned or credited_n:
@@ -2853,8 +2783,7 @@ class AutonomousBlueskyBotV2:
         for action in actions:
             if action.get("uri") != post_uri:
                 continue
-            rewarded = action.setdefault("rewarded_checks", [])
-            if check_id in rewarded:
+            if check_id in (action.get("rewarded_checks") or []):
                 continue
             if not _sg.can_credit:
                 if not blocked_logged:
@@ -2864,21 +2793,17 @@ class AutonomousBlueskyBotV2:
                     )
                     blocked_logged = True
                 continue
-            topic = action.get("topic") or "_other"
-            if eng.credit(topic, likes, replies, reposts, check_id):
-                rewarded.append(check_id)
+            n = self.learning.apply_engagement_credits(
+                action,
+                [check_id],
+                likes,
+                replies,
+                reposts,
+                can_credit=_sg.can_credit,
+            )
+            if n:
                 any_ok = True
-                logger.info(
-                    "🧠 EngagementLearner credit %s topic=%s likes=%s "
-                    "reposts=%s replies=%s",
-                    check_id,
-                    topic,
-                    likes,
-                    reposts,
-                    replies,
-                )
         if any_ok:
-            eng.save()
             try:
                 self.memory.save()
             except Exception as e:
@@ -2936,13 +2861,11 @@ class AutonomousBlueskyBotV2:
                 # Dual-credit on 6h/24h (idempotent via rewarded_checks)
                 if check_id in ('6h', '24h'):
                     strategy_key = post.get('strategy_key')
-                    rewarded = post.setdefault('rewarded_checks', [])
-                    memory_dirty = False
                     _sg = self._safety_status()
                     want_strategy = (
                         bool(strategy_key)
                         and post.get('type') != 'comment'
-                        and check_id not in rewarded
+                        and check_id not in post.get('rewarded_checks', [])
                     )
                     want_format = (
                         self.format_bandit is not None
@@ -2956,73 +2879,27 @@ class AutonomousBlueskyBotV2:
                             "🛡️ SafetyGovernor: credit blocked — %s",
                             ", ".join(_sg.reasons) or "unknown",
                         )
+
+                    followers_delta = None
                     if want_strategy and _sg.can_credit:
                         followers_now = await self.refresh_followers_count()
                         followers_delta = self._followers_delta_for_post(
                             post, now_count=followers_now
                         )
-                        credited = self.policy_learner.credit(
-                            strategy_key,
-                            post['likes'],
-                            post['reposts'],
-                            post['replies'],
-                            check_id,
-                            followers_delta=followers_delta,
-                        )
-                        if credited:
-                            rewarded.append(check_id)
-                            if _sg.can_sync_config:
-                                self.policy_learner.sync_config_weights(
-                                    self._config_path
-                                )
-                                self.config['post_strategies'] = (
-                                    self.policy_learner.export_weights()
-                                )
-                            else:
-                                logger.info(
-                                    "🛡️ SafetyGovernor: config sync "
-                                    "blocked — %s",
-                                    ", ".join(_sg.reasons) or "unknown",
-                                )
-                            self.policy_learner.save()
-                            memory_dirty = True
-                            logger.info(
-                                "🧠 PolicyLearner credit %s arm=%s likes=%s "
-                                "reposts=%s replies=%s",
-                                check_id,
-                                strategy_key,
-                                post['likes'],
-                                post['reposts'],
-                                post['replies'],
-                            )
 
-                    # FormatBandit credit (separate format_rewarded_checks)
-                    if want_format and _sg.can_credit:
-                        fmt_rewarded = post.setdefault(
-                            'format_rewarded_checks', []
-                        )
-                        fmt_ok = self.format_bandit.credit(
-                            ab_fmt,
-                            post['likes'],
-                            post['reposts'],
-                            post['replies'],
-                            check_id,
-                        )
-                        if fmt_ok:
-                            fmt_rewarded.append(check_id)
-                            self.format_bandit.save()
-                            memory_dirty = True
-                            logger.info(
-                                "🧠 FormatBandit credit %s arm=%s "
-                                "likes=%s reposts=%s replies=%s",
-                                check_id,
-                                ab_fmt,
-                                post['likes'],
-                                post['reposts'],
-                                post['replies'],
-                            )
-
-                    if memory_dirty:
+                    result = self.learning.apply_post_credits(
+                        post,
+                        [check_id] if want_strategy else [],
+                        [check_id] if want_format else [],
+                        can_credit=_sg.can_credit,
+                        can_sync_config=_sg.can_sync_config,
+                        followers_delta=followers_delta,
+                        config=self.config,
+                    )
+                    if (
+                        result.get("strategy_credited")
+                        or result.get("format_credited")
+                    ):
                         self.memory.save()
                 break
 

@@ -1,7 +1,7 @@
 # Plan: LearningOrchestrator extract (God Object next slice)
 
 **Created:** 2026-10-19  
-**Status:** Ready (not started)  
+**Status:** Slice 1 done (construction + facades; catch-up still on bot)  
 **Parent:** architecture re-score 8.0 — top lever #3  
 **Goal:** Move Wave 1–3 learning composition off `AutonomousBlueskyBotV2.__init__` / credit paths into `app/learning_orchestrator.py` without changing bandit math.
 

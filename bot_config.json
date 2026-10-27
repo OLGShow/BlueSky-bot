@@ -1,11 +1,11 @@
 {
   "post_strategies": {
-    "_create_quality_news_post": 0.17236565659383743,
-    "_create_quality_ai_insight": 0.16397401184928856,
-    "_create_trending_commentary": 0.16448001153148623,
-    "_create_personal_insight": 0.18681815355156506,
-    "_create_viral_hot_take": 0.1558507567827685,
-    "_create_prediction_post": 0.15651140969105415
+    "_create_quality_news_post": 0.1470839234670719,
+    "_create_quality_ai_insight": 0.19014916390464606,
+    "_create_trending_commentary": 0.171747534137507,
+    "_create_personal_insight": 0.18179810510729313,
+    "_create_viral_hot_take": 0.14211218329694675,
+    "_create_prediction_post": 0.16710909008653518
   },
   "bluesky_limits": {
     "max_posts_per_day": 10,

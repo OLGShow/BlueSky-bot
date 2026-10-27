@@ -1,7 +1,7 @@
 # План улучшений бота: аналитика роста, окна по времени, прокси/UA
 
 **Дата:** 2026-10-27  
-**Статус:** Waves 0–2 done + Wave 3.1 UA live (`proxy.enabled=false`); Wave 3.2 proxy canary pending
+**Статус:** Waves 0–2 done + Wave 3.1 UA live. **Wave 3.2 sticky proxy — cancelled** (один стабильный IP предпочтительнее; смена локации выглядит подозрительнее для платформы). `proxy.enabled` остаётся `false`.
 **Контекст:** после A+B+C follow growth (`every_n_cycles=2`, `max_follows_per_pass=3`, `require_bio_keyword=false`, commit `f26deb2`) нужно отделить полезный рост подписчиков от шума и риска бана/rate-limit.
 
 **Инварианты:**
@@ -155,9 +155,10 @@
 
 **Оценка:** 2–3 дня (+ canary)  
 **Цель:** снизить fingerprint при росте RPS после A+B+C.  
-**Риск:** смена IP mid-session ломает Bluesky auth — **только sticky**, не per-request.
+**Риск:** смена IP mid-session ломает Bluesky auth — **только sticky**, не per-request.  
+**Решение (2026-10-27):** Wave **3.1 UA — сделано**; Wave **3.2 proxy canary — не делаем**. Один постоянный IP хоста естественнее «человека дома»; ротация прокси/локаций скорее триггерит антифрод, чем снижает риск.
 
-**Зависимость:** после волн 1+2; сначала UA, потом proxy canary.
+**Зависимость:** после волн 1+2; сначала UA. Proxy-этап снят с roadmap.
 
 ### 3.1 User-Agent (низкий риск)
 
@@ -209,12 +210,10 @@ W1.3 Follow quality join (≥7d data)
  ↓
 W3.1 UA pool
  ↓
-W3.2 Sticky proxy canary (flag off → on 48h)
+W3.2 Sticky proxy — CANCELLED (keep proxy.enabled=false)
 ```
 
 **Параллелить можно:** W1.2 ∥ черновик конфига W2; W1.1 ∥ тесты `schedule_windows`.
-
-**Не параллелить с продом без флага:** W3.2 proxy.
 
 ---
 

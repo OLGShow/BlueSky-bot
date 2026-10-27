@@ -12,6 +12,7 @@ import logging
 from typing import Optional, Dict, Any, List
 import time
 
+from http_identity import get_user_agent
 from resilience_service import RetryPolicy
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,7 @@ class PollinationsAI:
         language: str = 'en',
         http_session: Optional[aiohttp.ClientSession] = None,
         retry_policy: Optional[RetryPolicy] = None,
+        bot_config: Optional[Dict[str, Any]] = None,
     ):
         """
         Initialize adapter for BlueSky audience
@@ -56,9 +58,11 @@ class PollinationsAI:
             language: Generation language ('en', 'ru')
             http_session: Optional shared ClientSession (caller owns lifecycle)
             retry_policy: Optional RetryPolicy from composition root (RETRY-002)
+            bot_config: Optional bot config for http_identity User-Agent
         """
         self.default_model_key = default_model
         self.language = language
+        self._bot_config: Optional[Dict[str, Any]] = bot_config
         # Shared session: lifecycle owned by bot/http_session helpers (_owns_session=False).
         self._session: Optional[aiohttp.ClientSession] = None
         self._owns_session: bool = True
@@ -79,7 +83,7 @@ class PollinationsAI:
         logger.info(f"📊 Available models: {list(self.MODELS.keys())}")
 
     def _default_headers(self) -> Dict[str, str]:
-        return {'User-Agent': 'BlueSky-Bot/2.1 (Python/aiohttp)'}
+        return {'User-Agent': get_user_agent(self._bot_config)}
 
     def set_http_session(self, session: Optional[aiohttp.ClientSession]) -> None:
         """Inject shared ClientSession; caller owns create/recreate/close.

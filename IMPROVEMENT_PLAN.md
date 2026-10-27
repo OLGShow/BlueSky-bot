@@ -1,7 +1,7 @@
 # План улучшений бота: аналитика роста, окна по времени, прокси/UA
 
 **Дата:** 2026-10-27  
-**Статус:** Wave 0+1 done (`orch-2026-10-27-improvement-w0w1`); Wave 2–3 pending
+**Статус:** Waves 0–2 done + Wave 3.1 UA live (`proxy.enabled=false`); Wave 3.2 proxy canary pending
 **Контекст:** после A+B+C follow growth (`every_n_cycles=2`, `max_follows_per_pass=3`, `require_bio_keyword=false`, commit `f26deb2`) нужно отделить полезный рост подписчиков от шума и риска бана/rate-limit.
 
 **Инварианты:**

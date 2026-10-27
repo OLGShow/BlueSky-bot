@@ -66,6 +66,7 @@ PYFILES=(
     publish_orchestrator.py
     publish_ports.py
     http_session.py
+    http_identity.py
     log_sanitizer.py
     learning_orchestrator.py
     llm_retro.py

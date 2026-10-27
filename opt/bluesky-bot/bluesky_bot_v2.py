@@ -1518,7 +1518,7 @@ class AutonomousBlueskyBotV2:
     def _create_http_session(self) -> None:
         """Создает HTTP сессию с надежными таймаутами (делегирует в http_session)."""
         try:
-            self.http_session = create_http_session()
+            self.http_session = create_http_session(getattr(self, "config", None))
         except Exception:
             self.http_session = None
             raise

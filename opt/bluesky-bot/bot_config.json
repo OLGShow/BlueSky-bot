@@ -392,5 +392,16 @@
     "mode": "hash_bucket",
     "state_path": "learning_followers_cohort.json",
     "reports_dir": "reports"
+  },
+  "http_identity": {
+    "rotate": "daily",
+    "user_agents": [
+      "BlueSky-Bot/2.1 (analytics)",
+      "BlueSky-Bot/2.1 (engagement)"
+    ]
+  },
+  "proxy": {
+    "enabled": false,
+    "sticky_hours": 24
   }
 }

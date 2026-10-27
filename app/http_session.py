@@ -9,9 +9,11 @@ recreate; close for shutdown.
 from __future__ import annotations
 
 import logging
-from typing import Callable, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Mapping, Optional, Protocol, runtime_checkable
 
 import aiohttp
+
+from http_identity import get_user_agent
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +26,15 @@ class HttpSessionConsumer(Protocol):
         ...
 
 
-def create_http_session() -> aiohttp.ClientSession:
-    """Create HTTP session with protective timeouts (sole ClientSession ctor)."""
+def create_http_session(
+    config: Optional[Mapping[str, Any]] = None,
+) -> aiohttp.ClientSession:
+    """Create HTTP session with protective timeouts (sole ClientSession ctor).
+
+    Sets a sticky User-Agent from ``http_identity`` (config or defaults).
+    Does **not** attach proxy — use ``http_identity.resolve_proxy_url`` for
+    aiohttp only when explicitly enabled.
+    """
     try:
         timeout = aiohttp.ClientTimeout(
             total=60,      # Общий таймаут запроса
@@ -41,7 +50,8 @@ def create_http_session() -> aiohttp.ClientSession:
                 ttl_dns_cache=300,  # Кэш DNS на 5 минут
                 use_dns_cache=True,
                 keepalive_timeout=30
-            )
+            ),
+            headers={"User-Agent": get_user_agent(config)},
         )
         logger.info("🌐 HTTP сессия создана с защитными таймаутами")
         return session

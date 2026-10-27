@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional
 
 import aiohttp
 
+from http_identity import get_user_agent
 from resilience_service import RetryPolicy
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,7 @@ class OpenRouterAI:
         model_id: Optional[str] = None,
         http_session: Optional[aiohttp.ClientSession] = None,
         retry_policy: Optional[RetryPolicy] = None,
+        bot_config: Optional[Dict[str, Any]] = None,
     ):
         self.api_key = (api_key or os.getenv("OPENROUTER_API_KEY") or "").strip()
         if not self.api_key:
@@ -61,6 +63,8 @@ class OpenRouterAI:
             os.getenv("OPENROUTER_IMAGE_MODEL") or self.DEFAULT_IMAGE_MODEL
         ).strip()
         self.image_quality = (os.getenv("OPENROUTER_IMAGE_QUALITY") or "low").strip().lower()
+        # Optional bot config for http_identity UA; defaults if unset.
+        self._bot_config: Optional[Dict[str, Any]] = bot_config
         # All bot roles use the configured OpenRouter model (default: gpt-4o-mini)
         self.MODELS = {k: self.model_id for k in type(self).MODELS}
 
@@ -101,7 +105,7 @@ class OpenRouterAI:
                 "OPENROUTER_HTTP_REFERER", "https://github.com/bluesky-bot"
             ),
             "X-Title": os.getenv("OPENROUTER_APP_TITLE", "BlueSky-Bot"),
-            "User-Agent": "BlueSky-Bot/2.1 (OpenRouter)",
+            "User-Agent": get_user_agent(self._bot_config),
         }
 
     def set_http_session(self, session: Optional[aiohttp.ClientSession]) -> None:

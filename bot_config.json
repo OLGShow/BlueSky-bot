@@ -294,7 +294,25 @@
   "scheduling": {
     "timezone": "UTC",
     "active_windows": [],
-    "quiet_hours": []
+    "quiet_hours": [],
+    "engagement_quiet_hours": [
+      2,
+      3,
+      4,
+      5
+    ],
+    "follow_quiet_hours": [
+      2,
+      3,
+      4,
+      5
+    ],
+    "follow_active_windows": [
+      [
+        7,
+        23
+      ]
+    ]
   },
   "learning_parameters": {
     "reward_scale": 10,

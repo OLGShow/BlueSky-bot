@@ -1315,6 +1315,8 @@ class AutonomousBlueskyBotV2:
             ),
             _post_interval_minutes=lambda: float(self.post_interval[0]),
             _is_posting_window=self._is_posting_window,
+            _is_engagement_window=self._is_engagement_window,
+            _is_follow_window=self._is_follow_window,
             _create_scheduled_post=self.create_scheduled_post,
             _update_posts_with_real_metrics=self.update_posts_with_real_metrics,
             _learn_from_memory=self.learn_from_memory,
@@ -1609,47 +1611,22 @@ class AutonomousBlueskyBotV2:
             raise
 
     def _is_posting_window(self) -> bool:
-        """Check scheduling config (quiet_hours / active_windows).
+        """Posting window via ``schedule_windows`` (Wave 2)."""
+        from schedule_windows import is_allowed
 
-        Returns True if no scheduling constraints are configured (backward compat).
-        """
-        sched = self.config.get('scheduling', {})
-        tz_name = sched.get('timezone', 'UTC')
-        quiet_hours = sched.get('quiet_hours', [])
-        active_windows = sched.get('active_windows', [])
+        return is_allowed(self.config.get("scheduling") or {}, "post")
 
-        # If nothing is configured, always allow
-        if not quiet_hours and not active_windows:
-            return True
+    def _is_engagement_window(self) -> bool:
+        """Engagement (like/repost) window — kind-specific or post fallback."""
+        from schedule_windows import is_allowed
 
-        try:
-            import zoneinfo
-            tz = zoneinfo.ZoneInfo(tz_name)
-        except Exception:
-            tz = None
+        return is_allowed(self.config.get("scheduling") or {}, "engagement")
 
-        now = datetime.now(tz)
-        current_hour = now.hour
+    def _is_follow_window(self) -> bool:
+        """Outbound follow window — kind-specific or post fallback."""
+        from schedule_windows import is_allowed
 
-        # quiet_hours: list of hours where posting is suppressed
-        if quiet_hours and current_hour in quiet_hours:
-            return False
-
-        # active_windows: list of [start_hour, end_hour] ranges
-        if active_windows:
-            for window in active_windows:
-                if not isinstance(window, (list, tuple)) or len(window) < 2:
-                    continue
-                start, end = int(window[0]), int(window[1])
-                if start <= end:
-                    if start <= current_hour < end:
-                        return True
-                else:
-                    if current_hour >= start or current_hour < end:
-                        return True
-            return False
-
-        return True
+        return is_allowed(self.config.get("scheduling") or {}, "follow")
 
     def _update_heartbeat(self) -> None:
         """Обновляет файл heartbeat (HB-001 → HeartbeatMonitor)."""

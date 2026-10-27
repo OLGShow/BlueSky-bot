@@ -68,6 +68,7 @@ PYFILES=(
     relevance_scoring.py
     resilience_service.py
     rss_content.py
+    schedule_windows.py
     rss_source_manager.py
     smart_engagement.py
     state_service.py

@@ -58,6 +58,12 @@ class RecordingPorts:
     def is_posting_window(self) -> bool:
         return self._in_window
 
+    def is_engagement_window(self) -> bool:
+        return True
+
+    def is_follow_window(self) -> bool:
+        return True
+
     async def create_scheduled_post(self) -> None:
         self.calls.append("post")
 

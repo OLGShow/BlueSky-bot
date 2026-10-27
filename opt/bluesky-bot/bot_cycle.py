@@ -41,6 +41,10 @@ class BotCyclePorts(Protocol):
 
     def is_posting_window(self) -> bool: ...
 
+    def is_engagement_window(self) -> bool: ...
+
+    def is_follow_window(self) -> bool: ...
+
     async def create_scheduled_post(self) -> None: ...
 
     async def update_posts_with_real_metrics(self) -> None: ...
@@ -92,6 +96,8 @@ class CallableBotCyclePorts:
     _follow_every_n_cycles: Callable[[], int]
     _post_interval_minutes: Callable[[], float]
     _is_posting_window: Callable[[], bool]
+    _is_engagement_window: Callable[[], bool]
+    _is_follow_window: Callable[[], bool]
     _create_scheduled_post: Callable[[], Awaitable[None]]
     _update_posts_with_real_metrics: Callable[[], Awaitable[None]]
     _learn_from_memory: Callable[[], None]
@@ -139,6 +145,18 @@ class CallableBotCyclePorts:
 
     def is_posting_window(self) -> bool:
         return self._is_posting_window()
+
+    def is_engagement_window(self) -> bool:
+        try:
+            return bool(self._is_engagement_window())
+        except Exception:
+            return True
+
+    def is_follow_window(self) -> bool:
+        try:
+            return bool(self._is_follow_window())
+        except Exception:
+            return True
 
     async def create_scheduled_post(self) -> None:
         await self._create_scheduled_post()
@@ -236,10 +254,27 @@ class BotCycleRunner:
         run_engagement = engagement_mode != "mention_only"
 
         if run_engagement:
-            await ports.smart_engagement()
+            eng_ok = True
+            try:
+                eng_ok = bool(ports.is_engagement_window())
+            except Exception:
+                eng_ok = True
+            if eng_ok:
+                await ports.smart_engagement()
+            else:
+                logger.info("🌙 Quiet hours — smart engagement пропущен")
+
             every_n = ports.follow_every_n_cycles()
             if cycle_count % every_n == 0:
-                await ports.follow_strategy()
+                follow_ok = True
+                try:
+                    follow_ok = bool(ports.is_follow_window())
+                except Exception:
+                    follow_ok = True
+                if follow_ok:
+                    await ports.follow_strategy()
+                else:
+                    logger.info("🌙 Quiet hours — follow strategy пропущена")
         else:
             logger.info("🔇 Engagement пропущен (mode=mention_only)")
 

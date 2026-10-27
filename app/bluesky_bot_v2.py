@@ -39,6 +39,11 @@ from policy_learner import (
     eligible_format_catch_up_checks,
 )
 from follower_tracker import delta_between
+from follower_analytics import (
+    FollowerCohortTracker,
+    parse_follower_analytics_config,
+    write_followers_daily_report,
+)
 from engagement_learner import eligible_engagement_catch_up_checks
 from learning_orchestrator import LearningOrchestrator
 
@@ -80,6 +85,7 @@ from engagement_ports import (
     UnlimitedBudget,
 )
 from engagement_service import EngagementService
+from api_incident_log import record_incident
 from content_ports import (
     ContentPorts,
     LiveBackgroundScheduler,
@@ -173,7 +179,10 @@ from strategies.viral_posts import (
 )
 from bot_cycle import BotCycleRunner, CallableBotCyclePorts, TickResult
 from content_publish_state import ContentPublishState
-from daily_reporting import DailyReportingFacade
+from daily_reporting import (
+    DailyReportingFacade,
+    write_followers_cohort_daily_report,
+)
 from engagement_cache_sync import (
     hydrate_engagement_caches_from_memory,
     sync_engagement_caches_to_memory,
@@ -318,6 +327,51 @@ BLUESKY_COMPLIANT_MODE = True  # Отключает автоматические
 NO_AUTO_COMMENTS = True  # Никаких автоматических комментариев (нарушение правил)
 NO_AUTO_MENTIONS = True  # Никаких автоматических упоминаний (нарушение правил)
 ONLY_LIKES_AND_REPOSTS = True  # Только лайки, репосты, подписки и собственные посты
+
+# ATProto op → incident stage (IMPROVEMENT_PLAN Wave 1.2). Longer tokens first.
+_ATPROTO_OP_STAGE: tuple[tuple[str, str], ...] = (
+    ("get_suggestions", "suggestions"),
+    ("get_profile", "get_profile"),
+    ("get_timeline", "get_timeline"),
+    ("get_post_thread", "get_timeline"),
+    ("get_trends", "get_trends"),
+    ("get_followers", "followers_cohort"),
+    ("send_post", "create_post"),
+    ("create_post", "create_post"),
+    ("upload_blob", "create_post"),
+    ("credential_login", "auth"),
+    ("restore_login", "auth"),
+    ("authenticate", "auth"),
+    ("login", "auth"),
+    ("follow", "follow"),
+    ("like", "like"),
+    ("repost", "repost"),
+    ("suggestions", "suggestions"),
+)
+
+
+def _atproto_op_name(fn) -> str:
+    """Best-effort op label from a callable (name / qualname tokens)."""
+    name = str(getattr(fn, "__name__", "") or "")
+    qual = str(getattr(fn, "__qualname__", "") or "")
+    blob = f"{qual} {name}".lower()
+    for token, _stage in _ATPROTO_OP_STAGE:
+        if token in blob:
+            return token
+    if name and name not in ("_inner", "<lambda>"):
+        return name
+    return name or "unknown"
+
+
+def _atproto_stage_from_op(op: str, fn=None) -> str:
+    """Map op (or callable qualname) to incident ``stage``; default ``other``."""
+    blob = str(op or "").lower()
+    if fn is not None:
+        blob = f"{getattr(fn, '__qualname__', '')} {blob}".lower()
+    for token, stage in _ATPROTO_OP_STAGE:
+        if token in blob:
+            return stage
+    return "other"
 
 
 @dataclass
@@ -726,6 +780,7 @@ class AutonomousBlueskyBotV2:
         self.follow_strategy_orchestrator = FollowStrategyOrchestrator(
             self._build_follow_ports(),
             policy=self.follow_policy,
+            decision_log=self.decision_log,
         )
         # Phase 7: smart engagement orchestrator (ENG-001)
         self.smart_engagement_orchestrator = SmartEngagementOrchestrator(
@@ -1283,6 +1338,7 @@ class AutonomousBlueskyBotV2:
             _health_monitor=self.health_monitor,
             _emergency_recovery=self.emergency_recovery,
             _persist_session=self._persist_session,
+            _maybe_refresh_follower_cohort=self.maybe_refresh_follower_cohort,
         )
 
     def _build_content_ports(self) -> ContentPorts:
@@ -1531,12 +1587,26 @@ class AutonomousBlueskyBotV2:
         return await self.retry_rss_http.execute(_once)
 
     async def _atproto_execute(self, fn, *args, **kwargs):
-        """ATProto read/write via ``retry_atproto`` (RETRY-003). Bounded; CLIENT no-retry."""
-        return await self.retry_atproto.execute(fn, *args, **kwargs)
+        """ATProto read/write via ``retry_atproto`` (RETRY-003). Bounded; CLIENT no-retry.
+
+        On failure, best-effort append to ``api_incident_log`` (never swallows).
+        """
+        try:
+            return await self.retry_atproto.execute(fn, *args, **kwargs)
+        except Exception as e:
+            op = _atproto_op_name(fn)
+            stage = _atproto_stage_from_op(op, fn)
+            record_incident(stage, op, exc=e)
+            raise
 
     async def _media_upload_execute(self, fn, *args, **kwargs):
         """Image download / ``upload_blob`` via ``retry_media_upload`` (RETRY-003)."""
-        return await self.retry_media_upload.execute(fn, *args, **kwargs)
+        try:
+            return await self.retry_media_upload.execute(fn, *args, **kwargs)
+        except Exception as e:
+            op = _atproto_op_name(fn)
+            record_incident("create_post", op or "media_upload", exc=e)
+            raise
 
     def _is_posting_window(self) -> bool:
         """Check scheduling config (quiet_hours / active_windows).
@@ -2499,6 +2569,113 @@ class AutonomousBlueskyBotV2:
             )
             return None
 
+    async def fetch_followers_dids(
+        self,
+        *,
+        max_pages: int = 8,
+        page_size: int = 100,
+    ) -> Optional[List[str]]:
+        """Page ``getFollowers`` with a hard page cap; backoff via ``_atproto_execute``.
+
+        Returns DID list (may be truncated by ``max_pages``), or ``None`` on
+        failure (incident already logged by ``_atproto_execute`` / explicit
+        ``followers_cohort`` stage).
+        """
+        handle = (self.handle or "").strip()
+        if not handle or not getattr(self, "bluesky_client", None):
+            return None
+        pages = max(1, min(20, int(max_pages)))
+        limit = max(1, min(100, int(page_size)))
+        dids: List[str] = []
+        cursor: Optional[str] = None
+        try:
+            for _page_i in range(pages):
+                params: Dict[str, Any] = {"actor": handle, "limit": limit}
+                if cursor:
+                    params["cursor"] = cursor
+
+                async def get_followers(p=params):
+                    return await self.bluesky_client.app.bsky.graph.get_followers(
+                        params=p
+                    )
+
+                resp = await self._atproto_execute(get_followers)
+                followers = getattr(resp, "followers", None) or []
+                for actor in followers:
+                    did = getattr(actor, "did", None)
+                    if did:
+                        dids.append(str(did))
+                cursor = getattr(resp, "cursor", None)
+                if not cursor:
+                    break
+                # Mild spacing between pages; retries/backoff live in execute.
+                await asyncio.sleep(0.25)
+            return dids
+        except Exception as e:
+            # Incident already appended by _atproto_execute (stage followers_cohort).
+            logger.warning(
+                "⚠️ Follower list fetch failed (cohort skipped): %s",
+                str(e)[:80],
+            )
+            return None
+
+    async def maybe_refresh_follower_cohort(self, cycle_count: int = 0) -> None:
+        """Rare cohort snapshot + ``reports/followers_daily_*.json`` (W1-006).
+
+        Cadence: ``follower_analytics.every_n_cycles`` (default 50). Skips when
+        disabled, off-cadence, or list fetch fails.
+        """
+        cfg = parse_follower_analytics_config(
+            (self.config or {}).get("follower_analytics")
+        )
+        if not cfg["enabled"]:
+            return
+        every_n = int(cfg["every_n_cycles"])
+        try:
+            cc = int(cycle_count)
+        except (TypeError, ValueError):
+            cc = 0
+        if cc <= 0 or cc % every_n != 0:
+            return
+
+        dids = await self.fetch_followers_dids(
+            max_pages=int(cfg["max_pages"]),
+            page_size=int(cfg["page_size"]),
+        )
+        if dids is None:
+            return
+
+        try:
+            tracker = FollowerCohortTracker(
+                path=str(cfg["state_path"]),
+                mode=str(cfg["mode"]),
+            )
+            report = tracker.apply(dids)
+            path = write_followers_cohort_daily_report(
+                report, out_dir=str(cfg["reports_dir"])
+            )
+            if path is None:
+                # Fallback if façade wrapper failed.
+                write_followers_daily_report(
+                    report, out_dir=str(cfg["reports_dir"])
+                )
+            logger.info(
+                "📊 Follower cohort: new=%s returned=%s churned=%s net=%s "
+                "(sample=%s ids, pages≤%s)",
+                report.get("new"),
+                report.get("returned"),
+                report.get("churned"),
+                report.get("net"),
+                len(dids),
+                cfg["max_pages"],
+            )
+        except Exception as e:
+            try:
+                record_incident("followers_cohort", "apply_snapshot", exc=e)
+            except Exception:
+                pass
+            logger.warning("⚠️ Follower cohort apply failed: %s", str(e)[:80])
+
     def _followers_delta_for_post(
         self,
         post: dict,
@@ -2920,12 +3097,13 @@ class AutonomousBlueskyBotV2:
                 for a in actions
                 if isinstance(a, dict) and a.get("action") == "like"
             )
-        return follow_should_follow_user(
+        ok, _reason = follow_should_follow_user(
             actor,
             require_bio_keyword=policy.require_bio_keyword,
             liked_count=liked,
             min_likes_for_follow=policy.min_likes_for_follow,
         )
+        return ok
 
     def update_user_relationship(self, user_did: str, action: str, score: float) -> None:
         """Обновляет отношения с пользователем"""

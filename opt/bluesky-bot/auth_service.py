@@ -11,6 +11,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
 
+from api_incident_log import record_incident
 from resilience_service import classify_error
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,7 @@ class AuthService:
                     )
                     return True
                 except Exception as e:
+                    record_incident("auth", "restore_login", exc=e)
                     logger.warning(
                         f"⚠️ Не удалось восстановить сессию: {e}. Переход к login."
                     )
@@ -80,6 +82,7 @@ class AuthService:
             logger.info(f"✅ Успешная авторизация: {handle}")
             return True
         except Exception as e:
+            record_incident("auth", "credential_login", exc=e)
             ec = classify_error(e)
             logger.error(f"❌ Ошибка авторизации ({ec.value}): {e}")
             return False

@@ -20,6 +20,7 @@ from policy_learner import (
     recent_strategy_keys_24h,
 )
 from post_strategies import successful_post_bandit_fields
+from api_incident_log import record_incident
 from publish_ports import PublishPorts
 from quality_pipeline import (
     STAGE_GATE,
@@ -297,5 +298,6 @@ class ScheduledPostPublisher:
                     )
 
         except Exception as e:
+            record_incident("create_post", "create_post", exc=e)
             logger.error(f"❌ Ошибка создания поста: {e}")
             p.bump_errors()

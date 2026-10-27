@@ -41,6 +41,7 @@ PYFILES=(
     bluesky_post_formatter.py
     bluesky_rich_posts.py
     agent_decision_log.py
+    api_incident_log.py
     auth_service.py
     bot_cycle.py
     bot_monitor.py
@@ -53,7 +54,9 @@ PYFILES=(
     engagement_learner.py
     engagement_ports.py
     engagement_service.py
+    engagement_stance.py
     follow_strategy.py
+    follower_analytics.py
     follower_tracker.py
     growth_engine.py
     health_service.py

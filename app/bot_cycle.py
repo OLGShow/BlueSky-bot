@@ -77,6 +77,8 @@ class BotCyclePorts(Protocol):
 
     def persist_session(self) -> None: ...
 
+    async def maybe_refresh_follower_cohort(self, cycle_count: int = 0) -> None: ...
+
 
 @dataclass
 class CallableBotCyclePorts:
@@ -108,6 +110,8 @@ class CallableBotCyclePorts:
     _health_monitor: Callable[[], Awaitable[Mapping[str, Any]]]
     _emergency_recovery: Callable[[], Awaitable[bool]]
     _persist_session: Callable[[], None]
+    # W1-006: optional; default no-op so hermetic cycle tests stay unchanged.
+    _maybe_refresh_follower_cohort: Optional[Callable[[int], Awaitable[None]]] = None
 
     def update_heartbeat(self) -> None:
         self._update_heartbeat()
@@ -189,6 +193,12 @@ class CallableBotCyclePorts:
 
     def persist_session(self) -> None:
         self._persist_session()
+
+    async def maybe_refresh_follower_cohort(self, cycle_count: int = 0) -> None:
+        hook = self._maybe_refresh_follower_cohort
+        if hook is None:
+            return
+        await hook(cycle_count)
 
 
 @dataclass
@@ -298,5 +308,11 @@ class BotCycleRunner:
 
         if cycle_count % 10 == 0 and cycle_count > 0:
             ports.persist_session()
+
+        # W1-006: rare follower cohort snapshot (no-op unless wired).
+        # Use getattr so RecordingPorts / older fakes stay hermetic.
+        cohort_hook = getattr(ports, "maybe_refresh_follower_cohort", None)
+        if cohort_hook is not None:
+            await cohort_hook(cycle_count)
 
         return TickResult(last_post_time=updated_last_post, stop=False)

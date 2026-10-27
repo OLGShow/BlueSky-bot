@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+from api_incident_log import record_incident
 from engagement_ports import EngagementPorts
 
 logger = logging.getLogger(__name__)
@@ -67,7 +68,17 @@ class EngagementService:
         if ports.dry_run.enabled:
             ports.dry_run.log('like', uri=uri, score=score)
         else:
-            await self._atproto_write(ports.client.like, uri, cid)
+            try:
+                await self._atproto_write(ports.client.like, uri, cid)
+            except Exception as e:
+                record_incident(
+                    "like",
+                    "like",
+                    exc=e,
+                    uri=uri,
+                    did=author_did,
+                )
+                raise
         self._budget_commit('like')
         ports.ledger.record(key)
         ports.stats['likes_given'] += 1
@@ -88,7 +99,17 @@ class EngagementService:
         if ports.dry_run.enabled:
             ports.dry_run.log('repost', uri=uri, score=score)
         else:
-            await self._atproto_write(ports.client.repost, uri, cid)
+            try:
+                await self._atproto_write(ports.client.repost, uri, cid)
+            except Exception as e:
+                record_incident(
+                    "repost",
+                    "repost",
+                    exc=e,
+                    uri=uri,
+                    did=author_did,
+                )
+                raise
         self._budget_commit('repost')
         ports.ledger.record(key)
         ports.stats['reposts_made'] += 1
@@ -109,7 +130,17 @@ class EngagementService:
         if ports.dry_run.enabled:
             ports.dry_run.log('follow', handle=handle, did=did, source=source or 'suggestions')
         else:
-            await self._atproto_write(ports.client.follow, did)
+            try:
+                await self._atproto_write(ports.client.follow, did)
+            except Exception as e:
+                record_incident(
+                    "follow",
+                    "follow",
+                    exc=e,
+                    did=did,
+                    extra={"source": source} if source else None,
+                )
+                raise
             ports.identity.followed_users.add(did)
         self._budget_commit('follow')
         ports.ledger.record(key)

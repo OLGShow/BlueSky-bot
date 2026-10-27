@@ -22,10 +22,19 @@ from typing import (
     Optional,
     Protocol,
     Sequence,
+    Tuple,
     runtime_checkable,
 )
 
+from agent_decision_log import AgentDecisionLog
+
 logger = logging.getLogger(__name__)
+
+# Discrete follow-quality reasons for agent_decision_log (W1-007).
+REASON_QUALITY_OK = "quality_ok"
+REASON_KEYWORD = "keyword"
+REASON_LIKED_ENOUGH = "liked_enough"
+REASON_REJECTED = "rejected"
 
 DEFAULT_FOLLOW_KEYWORDS: Sequence[str] = (
     "художник",
@@ -127,8 +136,15 @@ def should_follow_user(
     require_bio_keyword: bool = False,
     liked_count: int = 0,
     min_likes_for_follow: int = 2,
-) -> bool:
-    """Heuristic: quality filters + optional bio keywords / prior likes."""
+) -> Tuple[bool, str]:
+    """Heuristic: quality filters + optional bio keywords / prior likes.
+
+    Returns ``(ok, reason)`` where accept reasons are:
+    - ``quality_ok`` — quality gates passed and bio keyword not required
+    - ``keyword`` — bio keyword match (when ``require_bio_keyword``)
+    - ``liked_enough`` — prior likes threshold (when keyword missing)
+    Reject reason is ``rejected``.
+    """
     try:
         description = (actor.description or "").lower()
         found_keywords = [kw for kw in keywords if kw in description]
@@ -155,43 +171,48 @@ def should_follow_user(
                 "      ❌ Слишком популярный пользователь (%s подписчиков)",
                 followers_count,
             )
-            return False
+            return False, REASON_REJECTED
         if following_count > followers_count * 5 and followers_count > 0:
             logger.info(
                 "      ❌ Подозрительное соотношение подписок (%s vs %s)",
                 following_count,
                 followers_count,
             )
-            return False
+            return False, REASON_REJECTED
         if posts_count < 3:
             logger.info("      ❌ Низкая активность (%s постов)", posts_count)
-            return False
+            return False, REASON_REJECTED
         if posts_count == 0 and followers_count == 0 and following_count == 0:
             logger.info("      ❌ Совершенно новый аккаунт без активности")
-            return False
+            return False, REASON_REJECTED
 
         has_keyword = keyword_score >= 1
         liked_enough = liked_count >= min_likes_for_follow
         if require_bio_keyword:
-            result = has_keyword or liked_enough
-            reason = (
-                f"keyword={has_keyword} liked_enough={liked_enough} "
-                f"(need keyword or >={min_likes_for_follow} likes)"
+            if has_keyword:
+                result, reason = True, REASON_KEYWORD
+            elif liked_enough:
+                result, reason = True, REASON_LIKED_ENOUGH
+            else:
+                result, reason = False, REASON_REJECTED
+            detail = (
+                f"{reason} (keyword={has_keyword} liked_enough={liked_enough} "
+                f"need keyword or >={min_likes_for_follow} likes)"
             )
         else:
             # Quality gates alone — growth mode (C soft)
-            result = True
-            reason = "quality_ok (bio keyword not required)"
+            result, reason = True, REASON_QUALITY_OK
+            detail = "quality_ok (bio keyword not required)"
 
         logger.info(
             "      %s Итоговое решение: %s",
             "✅" if result else "❌",
-            reason,
+            detail,
         )
-        return result
+        return result, reason
     except Exception as e:
         logger.error("Ошибка анализа пользователя: %s", e)
-        return False
+        return False, REASON_REJECTED
 
 
 @runtime_checkable
@@ -264,15 +285,45 @@ class CallableFollowPorts:
 class FollowStrategyOrchestrator:
     """Suggestions then timeline follow sources (parity with bot)."""
 
-    __slots__ = ("_ports", "_policy")
+    __slots__ = ("_ports", "_policy", "_decision_log")
 
     def __init__(
         self,
         ports: CallableFollowPorts,
         policy: Optional[FollowPolicy] = None,
+        decision_log: Optional[AgentDecisionLog] = None,
     ) -> None:
         self._ports = ports
         self._policy = policy or FollowPolicy()
+        self._decision_log = decision_log
+
+    def _log_follow(
+        self,
+        *,
+        source: str,
+        reason: str,
+        did: str,
+        handle: str,
+        liked_count: int = 0,
+    ) -> None:
+        """Record outbound follow quality (W1-007). Never raises."""
+        log = self._decision_log
+        if log is None:
+            return
+        try:
+            log.log(
+                domain="follow",
+                action="follow",
+                arm=str(source or ""),
+                reason=str(reason or REASON_QUALITY_OK),
+                context={
+                    "did": did,
+                    "handle": handle,
+                    "liked_count": int(liked_count or 0),
+                },
+            )
+        except Exception as exc:
+            logger.warning("follow decision_log failed: %s", exc)
 
     async def run(self) -> None:
         """Fill up to ``max_follows_per_pass`` across suggestions then timeline."""
@@ -329,7 +380,7 @@ class FollowStrategyOrchestrator:
                     )
 
                     liked = ports.liked_count_for(profile.did)
-                    ok = should_follow_user(
+                    ok, reason = should_follow_user(
                         profile,
                         require_bio_keyword=policy.require_bio_keyword,
                         liked_count=liked,
@@ -351,6 +402,13 @@ class FollowStrategyOrchestrator:
                                 logger.info(
                                     "➕ Подписка на @%s выполнена!",
                                     profile.handle,
+                                )
+                                self._log_follow(
+                                    source="suggestions",
+                                    reason=reason,
+                                    did=profile.did,
+                                    handle=profile.handle,
+                                    liked_count=liked,
                                 )
                                 followed += 1
                             try:
@@ -433,7 +491,7 @@ class FollowStrategyOrchestrator:
                         "    Подписчики: %s, Посты: %s", followers, posts_count
                     )
 
-                    quality_ok = should_follow_user(
+                    quality_ok, reason = should_follow_user(
                         full_profile,
                         require_bio_keyword=policy.require_bio_keyword,
                         liked_count=liked,
@@ -457,6 +515,13 @@ class FollowStrategyOrchestrator:
                                 logger.info(
                                     "➕ Подписка на автора популярного поста @%s!",
                                     full_profile.handle,
+                                )
+                                self._log_follow(
+                                    source="timeline",
+                                    reason=reason,
+                                    did=full_profile.did,
+                                    handle=full_profile.handle,
+                                    liked_count=liked,
                                 )
                                 followed += 1
                             try:

@@ -365,5 +365,14 @@
     "timeline_min_engagement": 30,
     "suggestions_limit": 40,
     "timeline_limit": 30
+  },
+  "follower_analytics": {
+    "enabled": true,
+    "every_n_cycles": 50,
+    "max_pages": 8,
+    "page_size": 100,
+    "mode": "hash_bucket",
+    "state_path": "learning_followers_cohort.json",
+    "reports_dir": "reports"
   }
 }

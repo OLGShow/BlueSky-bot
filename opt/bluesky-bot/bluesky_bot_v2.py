@@ -178,7 +178,11 @@ from engagement_cache_sync import (
     hydrate_engagement_caches_from_memory,
     sync_engagement_caches_to_memory,
 )
-from follow_strategy import CallableFollowPorts, FollowStrategyOrchestrator
+from follow_strategy import (
+    CallableFollowPorts,
+    FollowPolicy,
+    FollowStrategyOrchestrator,
+)
 from follow_strategy import should_follow_user as follow_should_follow_user
 from heartbeat_monitor import HeartbeatMonitor
 from relevance_scoring import calculate_relevance as score_post_relevance
@@ -718,8 +722,10 @@ class AutonomousBlueskyBotV2:
         )
         # Thin-shell: RSS / follow / relevance (REL/FOL/RSS-001)
         self.rss_content_fetcher = RssContentFetcher(self._build_rss_content_ports())
+        self.follow_policy = FollowPolicy.from_bot_config(self.config)
         self.follow_strategy_orchestrator = FollowStrategyOrchestrator(
-            self._build_follow_ports()
+            self._build_follow_ports(),
+            policy=self.follow_policy,
         )
         # Phase 7: smart engagement orchestrator (ENG-001)
         self.smart_engagement_orchestrator = SmartEngagementOrchestrator(
@@ -921,6 +927,15 @@ class AutonomousBlueskyBotV2:
                 self.bluesky_client.get_timeline, limit=limit
             )
 
+        def _liked_count_for(did: str) -> int:
+            rel = (self.memory.user_relationships or {}).get(did) or {}
+            actions = rel.get("actions") or []
+            return sum(
+                1
+                for a in actions
+                if isinstance(a, dict) and a.get("action") == "like"
+            )
+
         return CallableFollowPorts(
             _get_suggestions=_get_suggestions,
             _get_profile=_get_profile,
@@ -933,6 +948,7 @@ class AutonomousBlueskyBotV2:
                 else None
             ),
             _followed_users=self.followed_users,
+            _liked_count_for=_liked_count_for,
         )
 
     def _build_smart_engagement_ports(self) -> SmartEngagementPorts:
@@ -1237,6 +1253,11 @@ class AutonomousBlueskyBotV2:
             _engagement_mode=lambda: self.config.get("engagement_mode", "open"),
             _smart_engagement=self.smart_engagement,
             _follow_strategy=self.follow_strategy,
+            _follow_every_n_cycles=lambda: int(
+                getattr(self, "follow_policy", None).every_n_cycles
+                if getattr(self, "follow_policy", None) is not None
+                else FollowPolicy.from_bot_config(self.config).every_n_cycles
+            ),
             _post_interval_minutes=lambda: float(self.post_interval[0]),
             _is_posting_window=self._is_posting_window,
             _create_scheduled_post=self.create_scheduled_post,
@@ -2886,7 +2907,25 @@ class AutonomousBlueskyBotV2:
     
     def should_follow_user(self, actor) -> bool:
         """Follow heuristic (FOL-001 → follow_strategy)."""
-        return follow_should_follow_user(actor)
+        policy = getattr(self, "follow_policy", None) or FollowPolicy.from_bot_config(
+            self.config
+        )
+        did = getattr(actor, "did", None) or ""
+        liked = 0
+        if did:
+            rel = (self.memory.user_relationships or {}).get(did) or {}
+            actions = rel.get("actions") or []
+            liked = sum(
+                1
+                for a in actions
+                if isinstance(a, dict) and a.get("action") == "like"
+            )
+        return follow_should_follow_user(
+            actor,
+            require_bio_keyword=policy.require_bio_keyword,
+            liked_count=liked,
+            min_likes_for_follow=policy.min_likes_for_follow,
+        )
 
     def update_user_relationship(self, user_did: str, action: str, score: float) -> None:
         """Обновляет отношения с пользователем"""

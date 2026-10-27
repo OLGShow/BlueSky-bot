@@ -35,6 +35,8 @@ class BotCyclePorts(Protocol):
 
     async def follow_strategy(self) -> None: ...
 
+    def follow_every_n_cycles(self) -> int: ...
+
     def post_interval_minutes(self) -> float: ...
 
     def is_posting_window(self) -> bool: ...
@@ -85,6 +87,7 @@ class CallableBotCyclePorts:
     _engagement_mode: Callable[[], str]
     _smart_engagement: Callable[[], Awaitable[None]]
     _follow_strategy: Callable[[], Awaitable[None]]
+    _follow_every_n_cycles: Callable[[], int]
     _post_interval_minutes: Callable[[], float]
     _is_posting_window: Callable[[], bool]
     _create_scheduled_post: Callable[[], Awaitable[None]]
@@ -120,6 +123,12 @@ class CallableBotCyclePorts:
 
     async def follow_strategy(self) -> None:
         await self._follow_strategy()
+
+    def follow_every_n_cycles(self) -> int:
+        try:
+            return max(1, int(self._follow_every_n_cycles()))
+        except Exception:
+            return 2
 
     def post_interval_minutes(self) -> float:
         return self._post_interval_minutes()
@@ -218,7 +227,8 @@ class BotCycleRunner:
 
         if run_engagement:
             await ports.smart_engagement()
-            if cycle_count % 5 == 0:
+            every_n = ports.follow_every_n_cycles()
+            if cycle_count % every_n == 0:
                 await ports.follow_strategy()
         else:
             logger.info("🔇 Engagement пропущен (mode=mention_only)")

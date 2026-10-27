@@ -49,6 +49,9 @@ class RecordingPorts:
     async def follow_strategy(self) -> None:
         self.calls.append("follow")
 
+    def follow_every_n_cycles(self) -> int:
+        return 2
+
     def post_interval_minutes(self) -> float:
         return 60.0
 
@@ -164,6 +167,27 @@ class TestBotCycleRunnerTick(unittest.TestCase):
         self.assertIn("metrics", ports.calls)
         self.assertIn("learn", ports.calls)
         self.assertIn("save", ports.calls)
+
+    def test_follow_every_other_cycle(self) -> None:
+        from bot_cycle import BotCycleRunner
+
+        ports = RecordingPorts()
+        runner = BotCycleRunner(ports)
+        fixed_now = datetime(2026, 10, 19, 12, 0, 0)
+        last_post = fixed_now - timedelta(hours=2)
+
+        asyncio.run(
+            runner.tick(cycle_count=2, last_post_time=last_post, now=lambda: fixed_now)
+        )
+        self.assertIn("follow", ports.calls)
+
+        ports2 = RecordingPorts()
+        asyncio.run(
+            BotCycleRunner(ports2).tick(
+                cycle_count=1, last_post_time=last_post, now=lambda: fixed_now
+            )
+        )
+        self.assertNotIn("follow", ports2.calls)
 
     def test_mention_only_skips_engagement(self) -> None:
         from bot_cycle import BotCycleRunner

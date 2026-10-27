@@ -356,5 +356,14 @@
     "engagement_topics_per_cycle": 3,
     "engagement_posts_per_topic": 5,
     "public_api_base": "https://public.api.bsky.app"
+  },
+  "follow_strategy": {
+    "every_n_cycles": 2,
+    "max_follows_per_pass": 3,
+    "require_bio_keyword": false,
+    "min_likes_for_follow": 2,
+    "timeline_min_engagement": 30,
+    "suggestions_limit": 40,
+    "timeline_limit": 30
   }
 }

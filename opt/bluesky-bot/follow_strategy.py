@@ -92,12 +92,43 @@ DEFAULT_FOLLOW_KEYWORDS: Sequence[str] = (
 )
 
 
+@dataclass(frozen=True)
+class FollowPolicy:
+    """Tunable follow growth knobs (from ``bot_config.follow_strategy``)."""
+
+    every_n_cycles: int = 2
+    max_follows_per_pass: int = 3
+    require_bio_keyword: bool = False
+    min_likes_for_follow: int = 2
+    timeline_min_engagement: int = 30
+    suggestions_limit: int = 40
+    timeline_limit: int = 30
+
+    @classmethod
+    def from_bot_config(cls, config: Optional[dict] = None) -> "FollowPolicy":
+        raw = (config or {}).get("follow_strategy") or {}
+        return cls(
+            every_n_cycles=max(1, int(raw.get("every_n_cycles", 2))),
+            max_follows_per_pass=max(1, int(raw.get("max_follows_per_pass", 3))),
+            require_bio_keyword=bool(raw.get("require_bio_keyword", False)),
+            min_likes_for_follow=max(1, int(raw.get("min_likes_for_follow", 2))),
+            timeline_min_engagement=max(
+                0, int(raw.get("timeline_min_engagement", 30))
+            ),
+            suggestions_limit=max(10, int(raw.get("suggestions_limit", 40))),
+            timeline_limit=max(10, int(raw.get("timeline_limit", 30))),
+        )
+
+
 def should_follow_user(
     actor: Any,
     *,
     keywords: Sequence[str] = DEFAULT_FOLLOW_KEYWORDS,
+    require_bio_keyword: bool = False,
+    liked_count: int = 0,
+    min_likes_for_follow: int = 2,
 ) -> bool:
-    """Heuristic: description keywords + soft quality filters."""
+    """Heuristic: quality filters + optional bio keywords / prior likes."""
     try:
         description = (actor.description or "").lower()
         found_keywords = [kw for kw in keywords if kw in description]
@@ -112,6 +143,11 @@ def should_follow_user(
             "      Найденные ключевые слова: %s (score: %s)",
             found_keywords,
             keyword_score,
+        )
+        logger.info(
+            "      prior_likes=%s require_keyword=%s",
+            liked_count,
+            require_bio_keyword,
         )
 
         if followers_count > 100000:
@@ -134,11 +170,23 @@ def should_follow_user(
             logger.info("      ❌ Совершенно новый аккаунт без активности")
             return False
 
-        result = keyword_score >= 1
+        has_keyword = keyword_score >= 1
+        liked_enough = liked_count >= min_likes_for_follow
+        if require_bio_keyword:
+            result = has_keyword or liked_enough
+            reason = (
+                f"keyword={has_keyword} liked_enough={liked_enough} "
+                f"(need keyword or >={min_likes_for_follow} likes)"
+            )
+        else:
+            # Quality gates alone — growth mode (C soft)
+            result = True
+            reason = "quality_ok (bio keyword not required)"
+
         logger.info(
-            "      %s Итоговое решение: %s ключевых слов >= 1",
+            "      %s Итоговое решение: %s",
             "✅" if result else "❌",
-            keyword_score,
+            reason,
         )
         return result
     except Exception as e:
@@ -164,6 +212,8 @@ class FollowPorts(Protocol):
 
     def get_my_did(self) -> Optional[str]: ...
 
+    def liked_count_for(self, did: str) -> int: ...
+
     @property
     def followed_users(self) -> MutableSet[str]: ...
 
@@ -179,6 +229,7 @@ class CallableFollowPorts:
     _update_relationship: Callable[[str, str, float], None]
     _get_my_did: Callable[[], Optional[str]]
     _followed_users: MutableSet[str]
+    _liked_count_for: Callable[[str], int] = lambda _did: 0
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
 
     async def get_suggestions(self, *, limit: int = 30) -> Any:
@@ -199,6 +250,12 @@ class CallableFollowPorts:
     def get_my_did(self) -> Optional[str]:
         return self._get_my_did()
 
+    def liked_count_for(self, did: str) -> int:
+        try:
+            return int(self._liked_count_for(did) or 0)
+        except Exception:
+            return 0
+
     @property
     def followed_users(self) -> MutableSet[str]:
         return self._followed_users
@@ -207,24 +264,40 @@ class CallableFollowPorts:
 class FollowStrategyOrchestrator:
     """Suggestions then timeline follow sources (parity with bot)."""
 
-    __slots__ = ("_ports",)
+    __slots__ = ("_ports", "_policy")
 
-    def __init__(self, ports: CallableFollowPorts) -> None:
+    def __init__(
+        self,
+        ports: CallableFollowPorts,
+        policy: Optional[FollowPolicy] = None,
+    ) -> None:
         self._ports = ports
+        self._policy = policy or FollowPolicy()
 
     async def run(self) -> None:
+        """Fill up to ``max_follows_per_pass`` across suggestions then timeline."""
         try:
-            for strategy in (self.from_suggestions, self.from_timeline):
-                followed = await strategy()
-                if followed > 0:
-                    break
+            cap = self._policy.max_follows_per_pass
+            followed = await self.from_suggestions(max_follows=cap)
+            if followed < cap:
+                followed += await self.from_timeline(max_follows=cap - followed)
+            logger.info(
+                "📊 Follow pass done: %s/%s (every_n=%s require_kw=%s)",
+                followed,
+                cap,
+                self._policy.every_n_cycles,
+                self._policy.require_bio_keyword,
+            )
         except Exception as e:
             logger.error("❌ Ошибка стратегии подписок: %s", e)
 
-    async def from_suggestions(self, *, max_follows: int = 1) -> int:
+    async def from_suggestions(self, *, max_follows: Optional[int] = None) -> int:
         ports = self._ports
+        policy = self._policy
+        if max_follows is None:
+            max_follows = policy.max_follows_per_pass
         try:
-            suggestions = await ports.get_suggestions(limit=30)
+            suggestions = await ports.get_suggestions(limit=policy.suggestions_limit)
             actors = getattr(suggestions, "actors", []) or []
             logger.info("👥 Получено %s рекомендаций пользователей", len(actors))
 
@@ -255,7 +328,13 @@ class FollowStrategyOrchestrator:
                         posts,
                     )
 
-                    ok = should_follow_user(profile)
+                    liked = ports.liked_count_for(profile.did)
+                    ok = should_follow_user(
+                        profile,
+                        require_bio_keyword=policy.require_bio_keyword,
+                        liked_count=liked,
+                        min_likes_for_follow=policy.min_likes_for_follow,
+                    )
                     logger.info(
                         "    Решение: %s",
                         "✅ Подписаться" if ok else "❌ Пропустить",
@@ -307,10 +386,13 @@ class FollowStrategyOrchestrator:
             logger.error("❌ Ошибка стратегии рекомендаций: %s", e)
             return 0
 
-    async def from_timeline(self, *, max_follows: int = 1) -> int:
+    async def from_timeline(self, *, max_follows: Optional[int] = None) -> int:
         ports = self._ports
+        policy = self._policy
+        if max_follows is None:
+            max_follows = policy.max_follows_per_pass
         try:
-            timeline = await ports.get_timeline(limit=30)
+            timeline = await ports.get_timeline(limit=policy.timeline_limit)
             feed = getattr(timeline, "feed", []) or []
             logger.info("📰 Анализ авторов популярных постов из ленты")
 
@@ -341,6 +423,7 @@ class FollowStrategyOrchestrator:
                     post_engagement = (post.post.like_count or 0) + (
                         post.post.repost_count or 0
                     ) * 2
+                    liked = ports.liked_count_for(full_profile.did)
 
                     logger.info(
                         "🔍 Автор популярного поста: @%s", full_profile.handle
@@ -350,11 +433,18 @@ class FollowStrategyOrchestrator:
                         "    Подписчики: %s, Посты: %s", followers, posts_count
                     )
 
+                    quality_ok = should_follow_user(
+                        full_profile,
+                        require_bio_keyword=policy.require_bio_keyword,
+                        liked_count=liked,
+                        min_likes_for_follow=policy.min_likes_for_follow,
+                    )
                     if (
-                        followers > 10
+                        quality_ok
+                        and followers > 10
                         and followers < 50000
                         and posts_count > 5
-                        and post_engagement > 50
+                        and post_engagement > policy.timeline_min_engagement
                         and full_profile.did not in ports.followed_users
                     ):
                         try:
